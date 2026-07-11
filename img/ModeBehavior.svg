@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">Hatch Mode Behavior Cheatsheet</title>
+  <desc id="desc">Explains the behavior of normal hatch selection and outer-zone-only cleaning pass.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f4f8fb; }
+      .title { font: 700 30px 'Segoe UI', Arial, sans-serif; fill: #112b3c; }
+      .panel { fill: #ffffff; stroke: #2b5876; stroke-width: 2.5; rx: 16; }
+      .panel2 { fill: #eef6ff; stroke: #2b5876; stroke-width: 2.5; rx: 16; }
+      .head { font: 700 22px 'Segoe UI', Arial, sans-serif; fill: #12354a; }
+      .txt { font: 500 16px 'Segoe UI', Arial, sans-serif; fill: #173c52; }
+      .mono { font: 600 15px 'Consolas', 'Courier New', monospace; fill: #0f3c5a; }
+      .ok { fill: #e9f9ec; stroke: #257a3e; stroke-width: 1.5; rx: 8; }
+      .warn { fill: #fff1e6; stroke: #ad5b1d; stroke-width: 1.5; rx: 8; }
+      .oktxt { font: 600 14px 'Segoe UI', Arial, sans-serif; fill: #1f6a35; }
+      .warntxt { font: 600 14px 'Segoe UI', Arial, sans-serif; fill: #8a4616; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="560"/>
+  <text class="title" x="42" y="58">Hatch Modes: Quick Reference</text>
+
+  <rect class="panel" x="42" y="98" width="540" height="420"/>
+  <text class="head" x="70" y="138">Normal Hatch</text>
+  <text class="txt" x="70" y="174">Uses selected zones from browser selection.</text>
+  <text class="txt" x="70" y="202">If Hatch All is enabled, all zones are included.</text>
+  <text class="txt" x="70" y="230">Inner contours can affect local carve/filter rules.</text>
+  <text class="mono" x="70" y="274">Best for: localized copper clearing</text>
+  <rect class="ok" x="70" y="304" width="460" height="44"/>
+  <text class="oktxt" x="86" y="332">Clicking a zone switches from Hatch All to manual selection.</text>
+  <rect class="warn" x="70" y="362" width="460" height="44"/>
+  <text class="warntxt" x="86" y="390">Dense geometries can generate very large line counts.</text>
+
+  <rect class="panel2" x="618" y="98" width="540" height="420"/>
+  <text class="head" x="646" y="138">Outer-Zone-Only Hatch</text>
+  <text class="txt" x="646" y="174">Always picks the single largest contour.</text>
+  <text class="txt" x="646" y="202">Ignores inner contours and drill-hole islands.</text>
+  <text class="txt" x="646" y="230">Selection state is not used for contour choice.</text>
+  <text class="mono" x="646" y="274">Best for: full-board cleaning pass (Edge.Cuts)</text>
+  <rect class="ok" x="646" y="304" width="460" height="44"/>
+  <text class="oktxt" x="662" y="332">Direct export and preview use the same outer-only algorithm.</text>
+  <rect class="ok" x="646" y="362" width="460" height="44"/>
+  <text class="oktxt" x="662" y="390">Layer hint appears in browser header/title.</text>
+</svg>
