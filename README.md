@@ -228,3 +228,9 @@ Keep the top-level bundle layout together when installing or packaging:
 - `static/`
 
 That is the clean install shape, so the browser app and the KiCad launcher stay side by side in the same folder tree.
+
+## License
+
+This project is licensed under the Apache License 2.0.
+
+See [LICENSE](LICENSE) for the full text.
