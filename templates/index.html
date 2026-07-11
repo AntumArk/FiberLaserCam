@@ -18,6 +18,7 @@
       <section class="panel controls">
         <h1>DXF Hatch Converter</h1>
         <p class="sub">Upload a KiCad isolation DXF, click zones to select, then export hatch lines.</p>
+        <p class="sub" id="layerHint">Layer: unknown</p>
 
         <label class="file-pick">
           <span>Upload DXF</span>
@@ -67,6 +68,10 @@
           <label>
             <input id="hatchAllInput" type="checkbox" />
             Hatch every closed object
+          </label>
+          <label>
+            <input id="outerZoneOnlyInput" type="checkbox" />
+            Hatch outer zone only (largest)
           </label>
         </div>
 

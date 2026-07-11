@@ -50,6 +50,13 @@ Open: http://127.0.0.1:5000
 
 A KiCad ActionPlugin lives in the repo root and launches the browser workflow from KiCad, exports the selected layer to DXF, and then hands off control to the local web app.
 
+Launcher behavior:
+
+- Shows a KiCad dialog with per-layer persistent settings.
+- Saves mode and parameters per layer (hatch or contour offset).
+- Supports two actions: `web_preview` (open browser) and `direct_export` (export immediately without preview).
+- Passes selected layer and mode/parameter hints to the web app via query parameters.
+
 ## Repository Layout
 
 Keep the top-level bundle layout together when installing or packaging:

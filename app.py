@@ -100,7 +100,6 @@ class UploadSession:
 
 
 SESSIONS: dict[str, UploadSession] = {}
-MAX_EXPORT_LINES = 2000
 DEFAULT_MIN_HATCH_AREA = 0.30
 SEGMENT_QUANT_GRID = 1e-3
 DEFAULT_MODE = "hatch"
@@ -351,6 +350,22 @@ def _build_zone_polygons(zone_map: dict[str, list[list[float]]]) -> dict[str, Po
     return result
 
 
+def _zone_depths(zone_polys: dict[str, Polygon]) -> dict[str, int]:
+    depths: dict[str, int] = {}
+    for zone_id, poly in zone_polys.items():
+        c = poly.representative_point()
+        depth = 0
+        for other_id, other in zone_polys.items():
+            if other_id == zone_id:
+                continue
+            if other.area <= poly.area:
+                continue
+            if other.contains(c):
+                depth += 1
+        depths[zone_id] = depth
+    return depths
+
+
 def _zone_hatch_geometry(zone_id: str, zone_polys: dict[str, Polygon], laser_radius: float):
     base = zone_polys.get(zone_id)
     if base is None:
@@ -374,6 +389,25 @@ def _zone_hatch_geometry(zone_id: str, zone_polys: dict[str, Polygon], laser_rad
             return None
 
     return _normalize_hatch_geom(carved)
+
+
+def _outer_only_hatch_geometry(zone_polys: dict[str, Polygon], laser_radius: float):
+    if not zone_polys:
+        return None
+
+    # Outer-only means one cleaning pass across the board envelope:
+    # pick the single largest contour and ignore inner contours/holes.
+    outer_id = max(zone_polys.keys(), key=lambda zid: zone_polys[zid].area)
+    geom = zone_polys.get(outer_id)
+    if geom is None or geom.is_empty:
+        return None
+
+    if laser_radius > 0:
+        geom = geom.buffer(-laser_radius)
+        if geom.is_empty:
+            return None
+
+    return _normalize_hatch_geom(geom)
 
 
 def _hatch_segments_for_angle(geom, angle_deg: float, spacing: float) -> list[list[list[float]]]:
@@ -539,12 +573,39 @@ def _generate_hatch_for_selection(
     spacing: float,
     laser_radius: float,
     min_area: float,
+    outer_zone_only: bool,
 ) -> tuple[list[list[list[float]]], dict[str, int]]:
     zone_polys = _build_zone_polygons(session.zone_map)
     normalized_ids = [str(zid) for zid in selected_ids]
 
     # Keep larger zones first when centroid-collapsing likely duplicates.
     normalized_ids.sort(key=lambda zid: zone_polys[zid].area if zid in zone_polys else 0.0, reverse=True)
+
+    outer_only_applied = 0
+    if outer_zone_only:
+        geom = _outer_only_hatch_geometry(zone_polys, laser_radius)
+        segments: list[list[list[float]]] = []
+        if geom is not None and _geom_area(geom) >= min_area and _passes_min_width(geom, math.sqrt(max(min_area, 0.0))):
+            segments = _hatch_segments(geom, angle, spacing)
+
+        min_seg_len = max(spacing * 0.75, laser_radius * 2.0, 0.02)
+        segments, dropped_tiny, dropped_dupe = _sanitize_segments(
+            segments,
+            min_length=min_seg_len,
+            quant_grid=SEGMENT_QUANT_GRID,
+        )
+
+        stats = {
+            "selected": 1 if zone_polys else 0,
+            "used": 1 if segments else 0,
+            "filteredSmall": 0 if segments else 1,
+            "filteredCentroid": 0,
+            "filteredNarrow": 0,
+            "droppedTiny": dropped_tiny,
+            "droppedDuplicate": dropped_dupe,
+            "outerOnlyApplied": 1,
+        }
+        return segments, stats
 
     segments: list[list[list[float]]] = []
     seen_centroids: set[tuple[float, float]] = set()
@@ -609,6 +670,7 @@ def _generate_hatch_for_selection(
         "filteredNarrow": filtered_narrow,
         "droppedTiny": dropped_tiny,
         "droppedDuplicate": dropped_dupe,
+        "outerOnlyApplied": outer_only_applied,
     }
     return segments, stats
 
@@ -796,6 +858,7 @@ def preview_hatch():
         return jsonify({"error": "Minimum area must be >= 0."}), 400
 
     use_manual_spacing = bool(payload.get("useManualSpacing", False))
+    outer_zone_only = bool(payload.get("outerZoneOnly", False))
     spacing_value: float | None = None
     spacing_raw = payload.get("spacing", None)
     if spacing_raw not in (None, ""):
@@ -815,6 +878,7 @@ def preview_hatch():
         spacing,
         laser_radius,
         min_area,
+        outer_zone_only,
     )
 
     return jsonify({"segments": segments, "effectiveSpacing": spacing, "stats": stats})
@@ -871,6 +935,7 @@ def export_dxf():
             return jsonify({"error": "Minimum area must be >= 0."}), 400
 
         use_manual_spacing = bool(payload.get("useManualSpacing", False))
+        outer_zone_only = bool(payload.get("outerZoneOnly", False))
         spacing_value: float | None = None
         spacing_raw = payload.get("spacing", None)
         if spacing_raw not in (None, ""):
@@ -890,6 +955,7 @@ def export_dxf():
             spacing,
             laser_radius,
             min_area,
+            outer_zone_only,
         )
         loops = []
 
@@ -919,16 +985,6 @@ def export_dxf():
         doc.layers.new(layer_name, dxfattribs={"color": 1})
 
     modelspace = doc.modelspace()
-    if mode != "contour_offsets" and len(segments) > MAX_EXPORT_LINES:
-        return jsonify(
-            {
-                "error": (
-                    f"Export would create {len(segments)} lines, above safety limit {MAX_EXPORT_LINES}. "
-                    "Increase spacing, reduce selected zones, or use contour offset mode."
-                )
-            }
-        ), 400
-
     if mode == "contour_offsets":
         for loop in loops:
             if len(loop) < 3:

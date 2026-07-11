@@ -19,6 +19,30 @@ const query = new URLSearchParams(window.location.search);
 const serverToken = query.get("token") || "";
 
 
+function queryNumber(name, fallback) {
+  const raw = query.get(name);
+  if (raw === null || raw === "") {
+    return fallback;
+  }
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function queryBool(name, fallback) {
+  const raw = (query.get(name) || "").trim().toLowerCase();
+  if (!raw) {
+    return fallback;
+  }
+  if (raw === "1" || raw === "true" || raw === "yes" || raw === "on") {
+    return true;
+  }
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") {
+    return false;
+  }
+  return fallback;
+}
+
+
 function startServerHeartbeat() {
   if (!serverToken) {
     return;
@@ -65,6 +89,7 @@ const els = {
   offsetSpacingInput: document.getElementById("offsetSpacingInput"),
   offsetCountInput: document.getElementById("offsetCountInput"),
   hatchAllInput: document.getElementById("hatchAllInput"),
+  outerZoneOnlyInput: document.getElementById("outerZoneOnlyInput"),
   clearBtn: document.getElementById("clearBtn"),
   exportBtn: document.getElementById("exportBtn"),
   zoneCount: document.getElementById("zoneCount"),
@@ -75,6 +100,44 @@ const els = {
 };
 
 const ctx = els.canvas.getContext("2d");
+
+function applyQueryDefaults() {
+  const mode = query.get("mode");
+  if (mode && (mode === "hatch" || mode === "contour_offsets")) {
+    els.modeInput.value = mode;
+  }
+
+  const layerFromKicad = query.get("layer") || query.get("layers") || "";
+  const layerHintEl = document.getElementById("layerHint");
+  if (layerFromKicad) {
+    document.title = `Fiber Laser DXF Hatch Tool - ${layerFromKicad}`;
+    if (layerHintEl) {
+      layerHintEl.textContent = `Layer: ${layerFromKicad}`;
+    }
+  } else if (layerHintEl) {
+    layerHintEl.textContent = "Layer: not provided";
+  }
+
+  els.angleInput.value = String(queryNumber("angle", Number(els.angleInput.value || 45)));
+  els.spacingInput.value = String(queryNumber("spacing", Number(els.spacingInput.value || 0.02)));
+  els.manualSpacingInput.checked = queryBool("useManualSpacing", els.manualSpacingInput.checked);
+  els.radiusInput.value = String(queryNumber("laserRadius", Number(els.radiusInput.value || 0.01)));
+  els.minAreaInput.value = String(queryNumber("minArea", Number(els.minAreaInput.value || 0.3)));
+  els.offsetStartInput.value = String(queryNumber("offsetStart", Number(els.offsetStartInput.value || 0.02)));
+  els.offsetSpacingInput.value = String(queryNumber("offsetSpacing", Number(els.offsetSpacingInput.value || 0.02)));
+  els.offsetCountInput.value = String(Math.max(1, Math.trunc(queryNumber("offsetCount", Number(els.offsetCountInput.value || 3)))));
+  els.hatchAllInput.checked = queryBool("hatchAll", els.hatchAllInput.checked);
+  els.outerZoneOnlyInput.checked = queryBool("outerZoneOnly", els.outerZoneOnlyInput.checked);
+
+  updateModeControlState();
+  updateSpacingControlState();
+  refreshStats();
+  draw();
+
+  if (layerFromKicad) {
+    setStatus(`Waiting for DXF upload. Layer hint from KiCad: ${layerFromKicad}`);
+  }
+}
 
 async function readJsonResponse(res, fallbackMessage) {
   const raw = await res.text();
@@ -108,6 +171,7 @@ function numericControls() {
     useManualSpacing: els.manualSpacingInput.checked,
     laserRadius: Number(els.radiusInput.value || 0.01),
     minArea: Number(els.minAreaInput.value || 0.3),
+    outerZoneOnly: els.outerZoneOnlyInput.checked,
     offsetStart: Number(els.offsetStartInput.value || 0.02),
     offsetSpacing: Number(els.offsetSpacingInput.value || 0.02),
     offsetCount: Number(els.offsetCountInput.value || 3),
@@ -142,6 +206,7 @@ function updateModeControlState() {
   els.manualSpacingInput.disabled = isContourMode;
   els.radiusInput.disabled = isContourMode;
   els.minAreaInput.disabled = isContourMode;
+  els.outerZoneOnlyInput.disabled = isContourMode;
   els.offsetStartInput.disabled = !isContourMode;
   els.offsetSpacingInput.disabled = !isContourMode;
   els.offsetCountInput.disabled = !isContourMode;
@@ -162,6 +227,9 @@ function updateSpacingControlState() {
 function effectiveSelectedIds() {
   if (!state.uploadId) {
     return [];
+  }
+  if (els.outerZoneOnlyInput.checked) {
+    return state.zones.map((z) => z.id);
   }
   if (els.hatchAllInput.checked) {
     return state.zones.map((z) => z.id);
@@ -356,8 +424,9 @@ function draw() {
 
 function refreshStats() {
   const selectedIds = effectiveSelectedIds();
+  const selectedDisplay = els.outerZoneOnlyInput.checked && selectedIds.length > 0 ? 1 : selectedIds.length;
   els.zoneCount.textContent = String(state.zones.length);
-  els.selectedCount.textContent = String(selectedIds.length);
+  els.selectedCount.textContent = String(selectedDisplay);
   els.segmentCount.textContent = String(state.segments.length);
   els.exportBtn.disabled = !state.uploadId || selectedIds.length === 0;
 }
@@ -536,13 +605,7 @@ els.fileInput.addEventListener("change", (event) => {
 
 (async () => {
   startServerHeartbeat();
-
-  const mode = query.get("mode");
-  if (mode && (mode === "hatch" || mode === "contour_offsets")) {
-    els.modeInput.value = mode;
-    updateModeControlState();
-    updateSpacingControlState();
-  }
+  applyQueryDefaults();
 
   const sourcePath = query.get("sourcePath");
   if (sourcePath) {
@@ -589,6 +652,10 @@ els.hatchAllInput.addEventListener("change", () => {
   schedulePreview();
 });
 
+els.outerZoneOnlyInput.addEventListener("change", () => {
+  schedulePreview();
+});
+
 els.clearBtn.addEventListener("click", () => {
   state.selected.clear();
   schedulePreview();
@@ -601,7 +668,11 @@ els.exportBtn.addEventListener("click", () => {
 });
 
 els.canvas.addEventListener("click", (event) => {
-  if (!state.zones.length || !state.worldBounds || els.hatchAllInput.checked) {
+  if (!state.zones.length || !state.worldBounds) {
+    return;
+  }
+
+  if (els.outerZoneOnlyInput.checked) {
     return;
   }
 
@@ -616,6 +687,11 @@ els.canvas.addEventListener("click", (event) => {
 
   if (!hit) {
     return;
+  }
+
+  if (els.hatchAllInput.checked) {
+    els.hatchAllInput.checked = false;
+    state.selected.clear();
   }
 
   if (state.selected.has(hit)) {
@@ -655,7 +731,8 @@ els.canvas.addEventListener(
     }
 
     if (els.hatchAllInput.checked) {
-      return;
+      els.hatchAllInput.checked = false;
+      state.selected.clear();
     }
 
     const world = screenToWorld(px, py);
@@ -728,23 +805,7 @@ updateModeControlState();
 updateSpacingControlState();
 draw();
 
-const initialParams = new URLSearchParams(window.location.search);
-const initialMode = initialParams.get("mode");
-if (initialMode === "hatch" || initialMode === "contour_offsets") {
-  els.modeInput.value = initialMode;
-}
-
-const hatchAllParam = (initialParams.get("hatchAll") || "").toLowerCase();
-if (hatchAllParam === "1" || hatchAllParam === "true" || hatchAllParam === "yes") {
-  els.hatchAllInput.checked = true;
-}
-
-updateModeControlState();
-updateSpacingControlState();
-refreshStats();
-draw();
-
-const initialUploadId = initialParams.get("uploadId");
+const initialUploadId = query.get("uploadId");
 if (initialUploadId) {
   loadUploadSession(initialUploadId)
     .then(() => {
