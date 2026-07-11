@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 import ezdxf
 from contour_offsets import generate_contour_offset_loops, generate_contour_offset_segments
@@ -27,9 +28,29 @@ _LAST_HEARTBEAT_TS = _START_TS
 _HAS_HEARTBEAT = False
 _DISCONNECT_REQUESTED = False
 _SHUTDOWN_LOCK = threading.Lock()
+_SESSION_LOCK = threading.Lock()
 
 STARTUP_IDLE_TIMEOUT_SEC = float(os.environ.get("FIBER_LASER_STARTUP_IDLE_TIMEOUT_SEC", "180"))
 HEARTBEAT_IDLE_TIMEOUT_SEC = float(os.environ.get("FIBER_LASER_HEARTBEAT_IDLE_TIMEOUT_SEC", "20"))
+SESSION_TTL_SEC = float(os.environ.get("FIBER_LASER_SESSION_TTL_SEC", "1800"))
+JANITOR_INTERVAL_SEC = float(os.environ.get("FIBER_LASER_JANITOR_INTERVAL_SEC", "30"))
+STALE_TEMP_FILE_TTL_SEC = float(os.environ.get("FIBER_LASER_STALE_TEMP_FILE_TTL_SEC", "3600"))
+
+
+@dataclass
+class UploadSession:
+    path: str
+    zone_map: dict[str, list[list[float]]]
+    zone_payload: list[dict]
+    created_ts: float
+    last_access_ts: float
+    temp_paths: list[str]
+
+
+SESSIONS: dict[str, UploadSession] = {}
+DEFAULT_MIN_HATCH_AREA = 0.30
+SEGMENT_QUANT_GRID = 1e-3
+DEFAULT_MODE = "hatch"
 
 
 def _token_ok(token: str | None) -> bool:
@@ -49,6 +70,84 @@ def _request_disconnect() -> None:
     global _DISCONNECT_REQUESTED
     with _SHUTDOWN_LOCK:
         _DISCONNECT_REQUESTED = True
+
+
+def _safe_unlink(path: str) -> None:
+    try:
+        Path(path).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _create_session_record(
+    dxf_path: str,
+    zone_map: dict[str, list[list[float]]],
+    zones: list[dict],
+    temp_paths: list[str] | None = None,
+) -> tuple[str, UploadSession]:
+    now = time.time()
+    upload_id = str(uuid.uuid4())
+    session = UploadSession(
+        path=dxf_path,
+        zone_map=zone_map,
+        zone_payload=zones,
+        created_ts=now,
+        last_access_ts=now,
+        temp_paths=list(temp_paths or []),
+    )
+    return upload_id, session
+
+
+def _touch_session(upload_id: str) -> None:
+    with _SESSION_LOCK:
+        session = SESSIONS.get(upload_id)
+        if session is not None:
+            session.last_access_ts = time.time()
+
+
+def _cleanup_session(upload_id: str, *, remove: bool = True) -> None:
+    with _SESSION_LOCK:
+        session = SESSIONS.pop(upload_id, None) if remove else SESSIONS.get(upload_id)
+    if session is None:
+        return
+    for temp_path in session.temp_paths:
+        _safe_unlink(temp_path)
+
+
+def _cleanup_expired_sessions() -> None:
+    cutoff = time.time() - SESSION_TTL_SEC
+    expired_ids: list[str] = []
+    with _SESSION_LOCK:
+        for upload_id, session in SESSIONS.items():
+            if session.last_access_ts <= cutoff:
+                expired_ids.append(upload_id)
+    for upload_id in expired_ids:
+        _cleanup_session(upload_id, remove=True)
+
+
+def _cleanup_stale_temp_files() -> None:
+    now = time.time()
+    candidates: list[Path] = [Path(tempfile.gettempdir()), Path(__file__).resolve().parent / "temp_dxf"]
+
+    for base in candidates:
+        if not base.exists() or not base.is_dir():
+            continue
+
+        for pattern in ("fiberlaser_upload_*.dxf", "*-fiber-web-*.dxf"):
+            for entry in base.glob(pattern):
+                try:
+                    mtime = entry.stat().st_mtime
+                except Exception:
+                    continue
+                if (now - mtime) > STALE_TEMP_FILE_TTL_SEC:
+                    _safe_unlink(str(entry))
+
+
+def _maintenance_janitor() -> None:
+    while True:
+        time.sleep(max(1.0, JANITOR_INTERVAL_SEC))
+        _cleanup_expired_sessions()
+        _cleanup_stale_temp_files()
 
 
 def _auto_shutdown_watchdog() -> None:
@@ -78,6 +177,7 @@ def _auto_shutdown_watchdog() -> None:
 
 
 threading.Thread(target=_auto_shutdown_watchdog, daemon=True).start()
+threading.Thread(target=_maintenance_janitor, daemon=True).start()
 
 
 @app.errorhandler(Exception)
@@ -90,19 +190,6 @@ def handle_api_exception(exc):
     if isinstance(exc, HTTPException):
         return exc
     return "Internal server error", 500
-
-
-@dataclass
-class UploadSession:
-    path: str
-    zone_map: dict[str, list[list[float]]]
-    zone_payload: list[dict]
-
-
-SESSIONS: dict[str, UploadSession] = {}
-DEFAULT_MIN_HATCH_AREA = 0.30
-SEGMENT_QUANT_GRID = 1e-3
-DEFAULT_MODE = "hatch"
 
 
 def _build_zone_payload_from_dxf_path(dxf_path: str) -> tuple[list[dict], dict[str, list[list[float]]]]:
@@ -134,10 +221,11 @@ def _build_zone_payload_from_dxf_path(dxf_path: str) -> tuple[list[dict], dict[s
     return zones, zone_map
 
 
-def _create_upload_session_from_dxf_path(dxf_path: str) -> tuple[str, list[dict]]:
+def _create_upload_session_from_dxf_path(dxf_path: str, temp_paths: list[str] | None = None) -> tuple[str, list[dict]]:
     zones, zone_map = _build_zone_payload_from_dxf_path(dxf_path)
-    upload_id = str(uuid.uuid4())
-    SESSIONS[upload_id] = UploadSession(path=dxf_path, zone_map=zone_map, zone_payload=zones)
+    upload_id, session = _create_session_record(dxf_path, zone_map, zones, temp_paths=temp_paths)
+    with _SESSION_LOCK:
+        SESSIONS[upload_id] = session
     return upload_id, zones
 
 
@@ -749,6 +837,10 @@ def disconnect():
     token = str(payload.get("token", "") or request.args.get("token", ""))
     if EPHEMERAL_MODE and not _token_ok(token):
         return jsonify({"error": "Invalid token."}), 403
+    with _SESSION_LOCK:
+        all_ids = list(SESSIONS.keys())
+    for sid in all_ids:
+        _cleanup_session(sid, remove=True)
     _request_disconnect()
     return jsonify({"ok": True})
 
@@ -767,13 +859,13 @@ def upload_file():
     if not data:
         return jsonify({"error": "Uploaded file is empty."}), 400
 
-    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf")
+    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf", prefix="fiberlaser_upload_")
     temp.write(data)
     temp.flush()
     temp.close()
 
     try:
-        upload_id, zones = _create_upload_session_from_dxf_path(temp.name)
+        upload_id, zones = _create_upload_session_from_dxf_path(temp.name, temp_paths=[temp.name])
     except Exception as exc:  # noqa: BLE001
         os.unlink(temp.name)
         return jsonify({"error": f"Failed to parse DXF: {exc}"}), 400
@@ -810,6 +902,8 @@ def get_session(upload_id: str):
     if session is None:
         return jsonify({"error": "Upload session not found. Re-upload DXF."}), 404
 
+    _touch_session(upload_id)
+
     return jsonify({"uploadId": upload_id, "zones": session.zone_payload})
 
 
@@ -822,6 +916,8 @@ def preview_hatch():
     session = SESSIONS.get(upload_id)
     if session is None:
         return jsonify({"error": "Upload session not found. Re-upload DXF."}), 404
+
+    _touch_session(upload_id)
 
     mode = str(payload.get("mode", DEFAULT_MODE))
     if mode not in {"hatch", "contour_offsets"}:
@@ -893,6 +989,8 @@ def export_dxf():
     session = SESSIONS.get(upload_id)
     if session is None:
         return jsonify({"error": "Upload session not found. Re-upload DXF."}), 404
+
+    _touch_session(upload_id)
 
     mode = str(payload.get("mode", DEFAULT_MODE))
     if mode not in {"hatch", "contour_offsets"}:
@@ -1002,6 +1100,8 @@ def export_dxf():
     doc.write(stream)
     out = io.BytesIO(stream.getvalue().encode("utf-8"))
     out.seek(0)
+
+    _cleanup_session(str(upload_id), remove=True)
 
     return send_file(
         out,
