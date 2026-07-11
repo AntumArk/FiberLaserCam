@@ -97,6 +97,7 @@ def generate_contour_offset_loops(geom, start_offset: float, spacing: float, rep
             offset_geom = geom.buffer(offset_distance) if offset_distance > 0 else geom
         except Exception:
             break
+
         offset_geom = _normalize_polygonal(offset_geom)
         if offset_geom is None or offset_geom.is_empty:
             break

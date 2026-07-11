@@ -3,7 +3,10 @@ from __future__ import annotations
 import io
 import math
 import os
+import signal
 import tempfile
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -16,6 +19,65 @@ from shapely.ops import polygonize
 from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__)
+
+EPHEMERAL_MODE = os.environ.get("FIBER_LASER_EPHEMERAL", "0") == "1"
+SERVER_TOKEN = os.environ.get("FIBER_LASER_SERVER_TOKEN", "").strip()
+_START_TS = time.time()
+_LAST_HEARTBEAT_TS = _START_TS
+_HAS_HEARTBEAT = False
+_DISCONNECT_REQUESTED = False
+_SHUTDOWN_LOCK = threading.Lock()
+
+STARTUP_IDLE_TIMEOUT_SEC = float(os.environ.get("FIBER_LASER_STARTUP_IDLE_TIMEOUT_SEC", "180"))
+HEARTBEAT_IDLE_TIMEOUT_SEC = float(os.environ.get("FIBER_LASER_HEARTBEAT_IDLE_TIMEOUT_SEC", "20"))
+
+
+def _token_ok(token: str | None) -> bool:
+    if not SERVER_TOKEN:
+        return True
+    return (token or "").strip() == SERVER_TOKEN
+
+
+def _touch_heartbeat() -> None:
+    global _LAST_HEARTBEAT_TS, _HAS_HEARTBEAT
+    with _SHUTDOWN_LOCK:
+        _LAST_HEARTBEAT_TS = time.time()
+        _HAS_HEARTBEAT = True
+
+
+def _request_disconnect() -> None:
+    global _DISCONNECT_REQUESTED
+    with _SHUTDOWN_LOCK:
+        _DISCONNECT_REQUESTED = True
+
+
+def _auto_shutdown_watchdog() -> None:
+    if not EPHEMERAL_MODE:
+        return
+
+    while True:
+        time.sleep(1.0)
+        with _SHUTDOWN_LOCK:
+            now = time.time()
+            since_start = now - _START_TS
+            since_heartbeat = now - _LAST_HEARTBEAT_TS
+            has_heartbeat = _HAS_HEARTBEAT
+            disconnect_requested = _DISCONNECT_REQUESTED
+
+        if disconnect_requested:
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+
+        if not has_heartbeat and since_start > STARTUP_IDLE_TIMEOUT_SEC:
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+
+        if has_heartbeat and since_heartbeat > HEARTBEAT_IDLE_TIMEOUT_SEC:
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+
+
+threading.Thread(target=_auto_shutdown_watchdog, daemon=True).start()
 
 
 @app.errorhandler(Exception)
@@ -42,6 +104,42 @@ MAX_EXPORT_LINES = 2000
 DEFAULT_MIN_HATCH_AREA = 0.30
 SEGMENT_QUANT_GRID = 1e-3
 DEFAULT_MODE = "hatch"
+
+
+def _build_zone_payload_from_dxf_path(dxf_path: str) -> tuple[list[dict], dict[str, list[list[float]]]]:
+    doc = ezdxf.readfile(dxf_path)
+    polys = _collect_entities_as_polygons(doc)
+
+    zones: list[dict] = []
+    zone_map: dict[str, list[list[float]]] = {}
+
+    zone_index = 0
+    for poly in polys:
+        for part in _iter_polygons(poly):
+            points = _poly_to_points(part)
+            if len(points) < 3:
+                continue
+            zone_index += 1
+            zone_id = str(zone_index)
+            minx, miny, maxx, maxy = part.bounds
+            zones.append(
+                {
+                    "id": zone_id,
+                    "points": points,
+                    "area": float(part.area),
+                    "bbox": [float(minx), float(miny), float(maxx), float(maxy)],
+                }
+            )
+            zone_map[zone_id] = points
+
+    return zones, zone_map
+
+
+def _create_upload_session_from_dxf_path(dxf_path: str) -> tuple[str, list[dict]]:
+    zones, zone_map = _build_zone_payload_from_dxf_path(dxf_path)
+    upload_id = str(uuid.uuid4())
+    SESSIONS[upload_id] = UploadSession(path=dxf_path, zone_map=zone_map, zone_payload=zones)
+    return upload_id, zones
 
 
 def _vec2(value) -> tuple[float, float]:
@@ -563,6 +661,36 @@ def index():
     return render_template("index.html")
 
 
+@app.get("/api/ping")
+def ping():
+    token = request.args.get("token", "")
+    if EPHEMERAL_MODE and not _token_ok(token):
+        return jsonify({"error": "Invalid token."}), 403
+    if token:
+        _touch_heartbeat()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/heartbeat")
+def heartbeat():
+    payload = request.get_json(silent=True) or {}
+    token = str(payload.get("token", "") or request.args.get("token", ""))
+    if EPHEMERAL_MODE and not _token_ok(token):
+        return jsonify({"error": "Invalid token."}), 403
+    _touch_heartbeat()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/disconnect")
+def disconnect():
+    payload = request.get_json(silent=True) or {}
+    token = str(payload.get("token", "") or request.args.get("token", ""))
+    if EPHEMERAL_MODE and not _token_ok(token):
+        return jsonify({"error": "Invalid token."}), 403
+    _request_disconnect()
+    return jsonify({"ok": True})
+
+
 @app.post("/api/upload")
 def upload_file():
     file = request.files.get("file")
@@ -583,38 +711,44 @@ def upload_file():
     temp.close()
 
     try:
-        doc = ezdxf.readfile(temp.name)
-        polys = _collect_entities_as_polygons(doc)
+        upload_id, zones = _create_upload_session_from_dxf_path(temp.name)
     except Exception as exc:  # noqa: BLE001
         os.unlink(temp.name)
         return jsonify({"error": f"Failed to parse DXF: {exc}"}), 400
 
-    zones: list[dict] = []
-    zone_map: dict[str, list[list[float]]] = {}
+    return jsonify({"uploadId": upload_id, "zones": zones})
 
-    zone_index = 0
-    for poly in polys:
-        for part in _iter_polygons(poly):
-            points = _poly_to_points(part)
-            if len(points) < 3:
-                continue
-            zone_index += 1
-            zone_id = str(zone_index)
-            minx, miny, maxx, maxy = part.bounds
-            zones.append(
-                {
-                    "id": zone_id,
-                    "points": points,
-                    "area": float(part.area),
-                    "bbox": [float(minx), float(miny), float(maxx), float(maxy)],
-                }
-            )
-            zone_map[zone_id] = points
 
-    upload_id = str(uuid.uuid4())
-    SESSIONS[upload_id] = UploadSession(path=temp.name, zone_map=zone_map, zone_payload=zones)
+@app.post("/api/upload-path")
+def upload_path():
+    payload = request.get_json(silent=True) or {}
+    raw_path = str(payload.get("path", "")).strip()
+    if not raw_path:
+        return jsonify({"error": "DXF path is required."}), 400
+
+    dxf_path = os.path.abspath(os.path.expanduser(raw_path))
+    if not os.path.isfile(dxf_path):
+        return jsonify({"error": f"DXF file not found: {dxf_path}"}), 404
+
+    _, ext = os.path.splitext(dxf_path.lower())
+    if ext != ".dxf":
+        return jsonify({"error": "Only DXF files are supported."}), 400
+
+    try:
+        upload_id, zones = _create_upload_session_from_dxf_path(dxf_path)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"Failed to parse DXF: {exc}"}), 400
 
     return jsonify({"uploadId": upload_id, "zones": zones})
+
+
+@app.get("/api/session/<upload_id>")
+def get_session(upload_id: str):
+    session = SESSIONS.get(upload_id)
+    if session is None:
+        return jsonify({"error": "Upload session not found. Re-upload DXF."}), 404
+
+    return jsonify({"uploadId": upload_id, "zones": session.zone_payload})
 
 
 @app.post("/api/preview")
@@ -823,4 +957,7 @@ def export_dxf():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    host = os.environ.get("FIBER_LASER_WEB_HOST", "127.0.0.1")
+    port = int(os.environ.get("FIBER_LASER_WEB_PORT", "5000"))
+    debug = os.environ.get("FIBER_LASER_WEB_DEBUG", "0") == "1"
+    app.run(host=host, port=port, debug=debug, use_reloader=False)

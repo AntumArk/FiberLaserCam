@@ -12,7 +12,46 @@ const state = {
   isPanning: false,
   lastPointerX: 0,
   lastPointerY: 0,
+  heartbeatTimer: null,
 };
+
+const query = new URLSearchParams(window.location.search);
+const serverToken = query.get("token") || "";
+
+
+function startServerHeartbeat() {
+  if (!serverToken) {
+    return;
+  }
+  if (state.heartbeatTimer) {
+    clearInterval(state.heartbeatTimer);
+  }
+
+  const ping = () => {
+    fetch("/api/heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: serverToken }),
+    }).catch(() => {});
+  };
+
+  ping();
+  state.heartbeatTimer = setInterval(ping, 4000);
+
+  window.addEventListener("beforeunload", () => {
+    const body = JSON.stringify({ token: serverToken });
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon("/api/disconnect", new Blob([body], { type: "application/json" }));
+      return;
+    }
+    fetch("/api/disconnect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      keepalive: true,
+    }).catch(() => {});
+  });
+}
 
 const els = {
   fileInput: document.getElementById("fileInput"),
@@ -65,14 +104,35 @@ function numericControls() {
   return {
     mode: els.modeInput.value || "hatch",
     angle: Number(els.angleInput.value || 45),
-    spacing: Number(els.spacingInput.value || 0.2),
+    spacing: Number(els.spacingInput.value || 0.02),
     useManualSpacing: els.manualSpacingInput.checked,
     laserRadius: Number(els.radiusInput.value || 0.01),
     minArea: Number(els.minAreaInput.value || 0.3),
-    offsetStart: Number(els.offsetStartInput.value || 0.2),
-    offsetSpacing: Number(els.offsetSpacingInput.value || 0.2),
+    offsetStart: Number(els.offsetStartInput.value || 0.02),
+    offsetSpacing: Number(els.offsetSpacingInput.value || 0.02),
     offsetCount: Number(els.offsetCountInput.value || 3),
   };
+}
+
+async function uploadDXFPath(path) {
+  setStatus("Loading DXF from path...");
+  const res = await fetch("/api/upload-path", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+  const json = await readJsonResponse(res, "Path upload failed.");
+
+  state.uploadId = json.uploadId;
+  state.zones = json.zones || [];
+  state.selected.clear();
+  state.segments = [];
+  state.colors.clear();
+  computeBounds();
+  resetView();
+  refreshStats();
+  draw();
+  setStatus(`Loaded ${state.zones.length} zones from path.`);
 }
 
 function updateModeControlState() {
@@ -327,6 +387,32 @@ async function uploadDXF(file) {
   }
 }
 
+async function loadUploadSession(uploadId) {
+  if (!uploadId) {
+    return;
+  }
+
+  setStatus("Loading session...");
+  const res = await fetch(`/api/session/${encodeURIComponent(uploadId)}`);
+  const json = await readJsonResponse(res, "Failed to load session.");
+
+  state.uploadId = json.uploadId;
+  state.zones = json.zones || [];
+  state.selected.clear();
+  state.segments = [];
+  state.colors.clear();
+  computeBounds();
+  resetView();
+  refreshStats();
+  draw();
+
+  if (state.zones.length) {
+    setStatus(`Loaded ${state.zones.length} zones from session.`);
+  } else {
+    setStatus("Session loaded, but no closed zones were found.");
+  }
+}
+
 async function requestPreview() {
   const selectedIds = effectiveSelectedIds();
   if (!state.uploadId || selectedIds.length === 0) {
@@ -448,6 +534,26 @@ els.fileInput.addEventListener("change", (event) => {
   });
 });
 
+(async () => {
+  startServerHeartbeat();
+
+  const mode = query.get("mode");
+  if (mode && (mode === "hatch" || mode === "contour_offsets")) {
+    els.modeInput.value = mode;
+    updateModeControlState();
+    updateSpacingControlState();
+  }
+
+  const sourcePath = query.get("sourcePath");
+  if (sourcePath) {
+    try {
+      await uploadDXFPath(sourcePath);
+      schedulePreview();
+    } catch (err) {
+      setStatus(err.message || "Failed to load source path.", true);
+    }
+  }
+})();
 for (const input of [
   els.modeInput,
   els.angleInput,
@@ -621,3 +727,30 @@ refreshStats();
 updateModeControlState();
 updateSpacingControlState();
 draw();
+
+const initialParams = new URLSearchParams(window.location.search);
+const initialMode = initialParams.get("mode");
+if (initialMode === "hatch" || initialMode === "contour_offsets") {
+  els.modeInput.value = initialMode;
+}
+
+const hatchAllParam = (initialParams.get("hatchAll") || "").toLowerCase();
+if (hatchAllParam === "1" || hatchAllParam === "true" || hatchAllParam === "yes") {
+  els.hatchAllInput.checked = true;
+}
+
+updateModeControlState();
+updateSpacingControlState();
+refreshStats();
+draw();
+
+const initialUploadId = initialParams.get("uploadId");
+if (initialUploadId) {
+  loadUploadSession(initialUploadId)
+    .then(() => {
+      if (effectiveSelectedIds().length > 0) {
+        schedulePreview();
+      }
+    })
+    .catch((err) => setStatus(err.message, true));
+}
