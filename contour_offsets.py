@@ -69,8 +69,14 @@ def _ring_points(coords, reverse: bool = False) -> list[tuple[float, float]]:
     return points
 
 
-def generate_contour_offset_segments(geom, start_offset: float, spacing: float, repetitions: int) -> list[list[list[float]]]:
-    loops = generate_contour_offset_loops(geom, start_offset, spacing, repetitions)
+def generate_contour_offset_segments(
+    geom,
+    start_offset: float,
+    spacing: float,
+    repetitions: int,
+    invert_direction: bool = False,
+) -> list[list[list[float]]]:
+    loops = generate_contour_offset_loops(geom, start_offset, spacing, repetitions, invert_direction=invert_direction)
     segments: list[list[list[float]]] = []
     for loop in loops:
         if len(loop) < 2:
@@ -82,7 +88,13 @@ def generate_contour_offset_segments(geom, start_offset: float, spacing: float, 
     return segments
 
 
-def generate_contour_offset_loops(geom, start_offset: float, spacing: float, repetitions: int) -> list[list[tuple[float, float]]]:
+def generate_contour_offset_loops(
+    geom,
+    start_offset: float,
+    spacing: float,
+    repetitions: int,
+    invert_direction: bool = False,
+) -> list[list[tuple[float, float]]]:
     if geom is None or geom.is_empty:
         return []
     if start_offset < 0 or spacing < 0 or repetitions <= 0:
@@ -92,9 +104,10 @@ def generate_contour_offset_loops(geom, start_offset: float, spacing: float, rep
     for step in range(repetitions):
         offset_distance = start_offset + (step * spacing)
         try:
-            # Contour-offset mode is defined as expanding away from the
-            # original contour, starting at start_offset and stepping outward.
-            offset_geom = geom.buffer(offset_distance) if offset_distance > 0 else geom
+            # Default behavior expands from contour. Inverted mode contracts
+            # toward interior regions (useful for drill-hole processing).
+            signed_distance = -offset_distance if invert_direction else offset_distance
+            offset_geom = geom.buffer(signed_distance) if signed_distance != 0 else geom
         except Exception:
             break
 

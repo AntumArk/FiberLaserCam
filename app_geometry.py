@@ -543,6 +543,7 @@ def generate_contour_offsets_for_selection(
     start_offset: float,
     spacing: float,
     repetitions: int,
+    invert_offset_direction: bool = False,
 ) -> tuple[list[list[list[float]]], dict[str, int]]:
     zone_polys = build_zone_polygons(session.zone_map)
     normalized_ids = [str(zid) for zid in selected_ids]
@@ -554,7 +555,13 @@ def generate_contour_offsets_for_selection(
         base = zone_polys.get(zone_id)
         if base is None:
             continue
-        zone_segments = generate_contour_offset_segments(base, start_offset, spacing, repetitions)
+        zone_segments = generate_contour_offset_segments(
+            base,
+            start_offset,
+            spacing,
+            repetitions,
+            invert_direction=invert_offset_direction,
+        )
         if zone_segments:
             segments.extend(zone_segments)
             used_zones += 1
@@ -584,6 +591,7 @@ def build_contour_loops_for_selection(
     start_offset: float,
     offset_spacing: float,
     offset_count: int,
+    invert_offset_direction: bool = False,
 ) -> list[list[tuple[float, float]]]:
     zone_polys = build_zone_polygons(session.zone_map)
     loops: list[list[tuple[float, float]]] = []
@@ -591,5 +599,13 @@ def build_contour_loops_for_selection(
         base = zone_polys.get(zid)
         if base is None:
             continue
-        loops.extend(generate_contour_offset_loops(base, start_offset, offset_spacing, offset_count))
+        loops.extend(
+            generate_contour_offset_loops(
+                base,
+                start_offset,
+                offset_spacing,
+                offset_count,
+                invert_direction=invert_offset_direction,
+            )
+        )
     return loops

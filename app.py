@@ -178,12 +178,15 @@ def preview_hatch():
         if start_offset < 0 or offset_spacing < 0 or offset_count <= 0:
             return jsonify({"error": "Contour offset values must be non-negative, with count > 0."}), 400
 
+        invert_offset_direction = bool(payload.get("invertOffsetDirection", False))
+
         segments, stats = generate_contour_offsets_for_selection(
             session,
             selected_ids,
             start_offset,
             offset_spacing,
             offset_count,
+            invert_offset_direction=invert_offset_direction,
         )
         return jsonify({"segments": segments, "effectiveSpacing": offset_spacing, "stats": stats})
 
@@ -250,14 +253,24 @@ def export_dxf():
         if start_offset < 0 or offset_spacing < 0 or offset_count <= 0:
             return jsonify({"error": "Contour offset values must be non-negative, with count > 0."}), 400
 
+        invert_offset_direction = bool(payload.get("invertOffsetDirection", False))
+
         segments, _ = generate_contour_offsets_for_selection(
             session,
             selected_ids,
             start_offset,
             offset_spacing,
             offset_count,
+            invert_offset_direction=invert_offset_direction,
         )
-        loops = build_contour_loops_for_selection(session, selected_ids, start_offset, offset_spacing, offset_count)
+        loops = build_contour_loops_for_selection(
+            session,
+            selected_ids,
+            start_offset,
+            offset_spacing,
+            offset_count,
+            invert_offset_direction=invert_offset_direction,
+        )
     else:
         try:
             angle = float(payload.get("angle", 45))

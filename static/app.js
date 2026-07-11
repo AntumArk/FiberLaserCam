@@ -88,6 +88,7 @@ const els = {
   offsetStartInput: document.getElementById("offsetStartInput"),
   offsetSpacingInput: document.getElementById("offsetSpacingInput"),
   offsetCountInput: document.getElementById("offsetCountInput"),
+  invertOffsetDirectionInput: document.getElementById("invertOffsetDirectionInput"),
   hatchAllInput: document.getElementById("hatchAllInput"),
   outerZoneOnlyInput: document.getElementById("outerZoneOnlyInput"),
   clearBtn: document.getElementById("clearBtn"),
@@ -126,6 +127,7 @@ function applyQueryDefaults() {
   els.offsetStartInput.value = String(queryNumber("offsetStart", Number(els.offsetStartInput.value || 0.02)));
   els.offsetSpacingInput.value = String(queryNumber("offsetSpacing", Number(els.offsetSpacingInput.value || 0.02)));
   els.offsetCountInput.value = String(Math.max(1, Math.trunc(queryNumber("offsetCount", Number(els.offsetCountInput.value || 3)))));
+  els.invertOffsetDirectionInput.checked = queryBool("invertOffsetDirection", els.invertOffsetDirectionInput.checked);
   els.hatchAllInput.checked = queryBool("hatchAll", els.hatchAllInput.checked);
   els.outerZoneOnlyInput.checked = queryBool("outerZoneOnly", els.outerZoneOnlyInput.checked);
 
@@ -175,6 +177,7 @@ function numericControls() {
     offsetStart: Number(els.offsetStartInput.value || 0.02),
     offsetSpacing: Number(els.offsetSpacingInput.value || 0.02),
     offsetCount: Number(els.offsetCountInput.value || 3),
+    invertOffsetDirection: els.invertOffsetDirectionInput.checked,
   };
 }
 
@@ -210,6 +213,7 @@ function updateModeControlState() {
   els.offsetStartInput.disabled = !isContourMode;
   els.offsetSpacingInput.disabled = !isContourMode;
   els.offsetCountInput.disabled = !isContourMode;
+  els.invertOffsetDirectionInput.disabled = !isContourMode;
 }
 
 function updateSpacingControlState() {
@@ -626,6 +630,7 @@ for (const input of [
   els.offsetStartInput,
   els.offsetSpacingInput,
   els.offsetCountInput,
+  els.invertOffsetDirectionInput,
 ]) {
   input.addEventListener("input", () => {
     if (input === els.modeInput) {

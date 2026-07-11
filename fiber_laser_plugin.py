@@ -36,6 +36,7 @@ DEFAULT_LAYER_SETTINGS: dict[str, object] = {
     "offsetStart": 0.02,
     "offsetSpacing": 0.02,
     "offsetCount": 3,
+    "invertOffsetDirection": False,
     "hatchAll": True,
     "outerZoneOnly": False,
 }
@@ -100,6 +101,7 @@ def _sanitize_layer_settings(raw: dict[str, object] | None) -> dict[str, object]
         "offsetStart": _coerce_float(merged.get("offsetStart"), float(DEFAULT_LAYER_SETTINGS["offsetStart"])),
         "offsetSpacing": _coerce_float(merged.get("offsetSpacing"), float(DEFAULT_LAYER_SETTINGS["offsetSpacing"])),
         "offsetCount": max(1, _coerce_int(merged.get("offsetCount"), int(DEFAULT_LAYER_SETTINGS["offsetCount"]))),
+        "invertOffsetDirection": _coerce_bool(merged.get("invertOffsetDirection"), bool(DEFAULT_LAYER_SETTINGS["invertOffsetDirection"])),
         "hatchAll": _coerce_bool(merged.get("hatchAll"), bool(DEFAULT_LAYER_SETTINGS["hatchAll"])),
         "outerZoneOnly": _coerce_bool(merged.get("outerZoneOnly"), bool(DEFAULT_LAYER_SETTINGS["outerZoneOnly"])),
     }
@@ -431,6 +433,7 @@ class LauncherSettingsDialog(wx.Dialog):
         self.offset_start_ctrl = wx.TextCtrl(panel)
         self.offset_spacing_ctrl = wx.TextCtrl(panel)
         self.offset_count_ctrl = wx.TextCtrl(panel)
+        self.invert_offset_direction_ctrl = wx.CheckBox(panel, label="Invert offset direction (toward interior)")
         self.hatch_all_ctrl = wx.CheckBox(panel, label="Select all zones for export")
         self.outer_zone_only_ctrl = wx.CheckBox(panel, label="Outer zone only (largest polygon)")
 
@@ -449,6 +452,7 @@ class LauncherSettingsDialog(wx.Dialog):
         add_row("Contour start offset (mm)", self.offset_start_ctrl)
         add_row("Contour spacing (mm)", self.offset_spacing_ctrl)
         add_row("Contour count", self.offset_count_ctrl)
+        add_row("Contour direction", self.invert_offset_direction_ctrl)
         add_row("Zone selection", self.hatch_all_ctrl)
         add_row("Edge-cuts cleaning", self.outer_zone_only_ctrl)
 
@@ -505,6 +509,7 @@ class LauncherSettingsDialog(wx.Dialog):
         self.offset_start_ctrl.SetValue(f"{float(s['offsetStart']):.4f}".rstrip("0").rstrip("."))
         self.offset_spacing_ctrl.SetValue(f"{float(s['offsetSpacing']):.4f}".rstrip("0").rstrip("."))
         self.offset_count_ctrl.SetValue(str(int(s["offsetCount"])))
+        self.invert_offset_direction_ctrl.SetValue(bool(s["invertOffsetDirection"]))
         self.hatch_all_ctrl.SetValue(bool(s["hatchAll"]))
         self.outer_zone_only_ctrl.SetValue(bool(s["outerZoneOnly"]))
 
@@ -543,6 +548,7 @@ class LauncherSettingsDialog(wx.Dialog):
             "offsetStart": offset_start,
             "offsetSpacing": offset_spacing,
             "offsetCount": offset_count,
+            "invertOffsetDirection": self.invert_offset_direction_ctrl.GetValue(),
             "hatchAll": self.hatch_all_ctrl.GetValue(),
             "outerZoneOnly": self.outer_zone_only_ctrl.GetValue(),
         }
@@ -562,6 +568,7 @@ class LauncherSettingsDialog(wx.Dialog):
         self.offset_start_ctrl.Enable(is_contour)
         self.offset_spacing_ctrl.Enable(is_contour)
         self.offset_count_ctrl.Enable(is_contour)
+        self.invert_offset_direction_ctrl.Enable(is_contour)
         self.outer_zone_only_ctrl.Enable(not is_contour)
 
     def _current_layer(self) -> str:
@@ -639,6 +646,7 @@ def _direct_export_via_web(raw_output_path: Path, selected_layer: str, settings:
             "offsetStart": settings["offsetStart"],
             "offsetSpacing": settings["offsetSpacing"],
             "offsetCount": settings["offsetCount"],
+            "invertOffsetDirection": settings["invertOffsetDirection"],
         }
         status, body = _http_post_raw(f"{base_url}api/export", payload, timeout=120.0)
         if status != 200:
@@ -784,6 +792,7 @@ class FiberLaserExportPlugin(pcbnew.ActionPlugin):
             f"&offsetStart={quote_plus(str(layer_settings['offsetStart']))}"
             f"&offsetSpacing={quote_plus(str(layer_settings['offsetSpacing']))}"
             f"&offsetCount={quote_plus(str(layer_settings['offsetCount']))}"
+            f"&invertOffsetDirection={quote_plus('1' if bool(layer_settings['invertOffsetDirection']) else '0')}"
             f"&hatchAll={quote_plus('1' if bool(layer_settings['hatchAll']) else '0')}"
         )
         webbrowser.open(web_url)

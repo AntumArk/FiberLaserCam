@@ -192,12 +192,18 @@ These settings exist in the KiCad launcher dialog and/or browser UI. The cutting
   - What it does: number of inward loops.
   - Cutting impact: higher count increases total exposure time and can cause burn-through on thin stock.
 
+- `Invert offset direction (toward interior)`
+  - What it does: flips contour offset direction from expansion to contraction.
+  - Cutting impact: useful for processing hole-like features where offsets should move inward from boundary.
+  - Drill-hole use: enable this when you want offset passes to tighten toward hole centers instead of growing outward.
+
 ### Practical Process Guidance
 
 - Start with wider spacing and lower loop count, then tighten gradually.
 - Run a small test coupon on the same material before full-board processing.
 - Watch for browning, deep char, or edge collapse as early signs of too much energy density.
 - If overburn appears, increase spacing, reduce passes, or increase feed speed / reduce power on your machine.
+- For drill-hole contour processing, start with small count and conservative spacing when using inverted direction.
 
 ### Edge.Cuts Cleaning Pass
 
