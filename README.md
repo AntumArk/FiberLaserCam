@@ -119,19 +119,6 @@ If the button does not appear:
 - Check KiCad's plugin console for Python import errors.
 - Re-run plugin refresh after any file changes.
 
-### Install Via KiCad Plugin And Content Manager (PCM Repository)
-
-Every GitHub release publishes a self-hosted PCM repository alongside the plugin zip, so KiCad can find, install, and update FiberLaserCam directly from its Plugin and Content Manager instead of a manual copy.
-
-1. Open KiCad's PCM: `Tools -> Plugin and Content Manager`.
-2. `Manage`  ->  `Add` and paste this repository URL:
-   ```text
-   https://github.com/AntumArk/FiberLaserCam/releases/latest/download/repository.json
-   ```
-3. FiberLaserCam now shows up under `Plugins`; click `Install`.
-4. Future releases show up as updates in the same PCM dialog.
-
-This URL always resolves to the latest release's `repository.json`. Each release regenerates `packages.json`/`repository.json` with the correct `download_sha256`, `download_size`, and `install_size` for that release's zip, while keeping prior versions' download links (pinned to their own release tag) working for users on older KiCad releases.
 
 ### PCM Package Notes
 
