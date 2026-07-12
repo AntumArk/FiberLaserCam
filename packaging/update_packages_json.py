@@ -40,6 +40,17 @@ def write_json(path: Path, data: dict) -> None:
         f.write("\n")
 
 
+def version_sort_key(entry: dict) -> tuple[int, ...]:
+    raw = str(entry.get("version", ""))
+    parts: list[int] = []
+    for piece in raw.split("."):
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            parts.append(-1)
+    return tuple(parts)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True, help="Version number, e.g. 0.1.14")
@@ -89,7 +100,7 @@ def main() -> int:
             version_entry.setdefault(key, prior.get(key))
 
     existing_versions.insert(0, version_entry)
-    entry["versions"] = existing_versions
+    entry["versions"] = sorted(existing_versions, key=version_sort_key, reverse=True)
 
     write_json(LEDGER_PATH, ledger)
     print(f"packaging/packages.json updated for version {args.version}")
