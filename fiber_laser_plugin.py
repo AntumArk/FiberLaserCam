@@ -6,6 +6,7 @@ import re
 import socket
 import subprocess
 import shutil
+import sys
 import tempfile
 import time
 import urllib.request
@@ -232,7 +233,7 @@ def _load_dependency_specs() -> list[str]:
         PLUGIN_DIR / "requirements.txt",
     ]
 
-    names = {"numpy", "ezdxf", "shapely", "flask"}
+    names = {"ezdxf", "shapely", "flask"}
     for req in req_candidates:
         if not req or not req.exists():
             continue
@@ -249,13 +250,66 @@ def _load_dependency_specs() -> list[str]:
             continue
 
         if picked:
-            if not any(re.split(r"[<>=!~]", s, maxsplit=1)[0].strip().lower() == "numpy" for s in picked):
-                picked.append("numpy==1.26.4")
             if not any(re.split(r"[<>=!~]", s, maxsplit=1)[0].strip().lower() == "flask" for s in picked):
                 picked.append("Flask==3.0.3")
             return picked
 
-    return ["numpy==1.26.4", "ezdxf==1.4.4", "shapely==2.0.7", "Flask==3.0.3"]
+    return ["ezdxf==1.4.4", "shapely==2.0.7", "Flask==3.0.3"]
+
+
+def _python_can_import_web_deps(python_exe: str) -> bool:
+    if not python_exe:
+        return False
+
+    clean_env = dict(os.environ)
+    clean_env.pop("PYTHONHOME", None)
+    clean_env.pop("PYTHONPATH", None)
+
+    deps_dir = str(PLUGIN_DIR / ".deps")
+    code = f"import sys; sys.path.insert(0, {deps_dir!r}); import ezdxf, shapely, flask"
+    check = subprocess.run(
+        [python_exe, "-c", code],
+        capture_output=True,
+        text=True,
+        env=clean_env,
+    )
+    return check.returncode == 0
+
+
+def _detect_web_runtime_python() -> str | None:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add_candidate(candidate: str | None) -> None:
+        if not candidate:
+            return
+        resolved = str(Path(candidate).expanduser())
+        if resolved in seen:
+            return
+        if not Path(resolved).exists():
+            return
+        seen.add(resolved)
+        candidates.append(resolved)
+
+    add_candidate(sys.executable)
+    add_candidate(shutil.which("kicad-python"))
+    add_candidate(shutil.which("python3"))
+    add_candidate(shutil.which("python"))
+
+    if sys.platform.startswith("linux"):
+        appdir = os.environ.get("APPDIR", "").strip()
+        if appdir:
+            add_candidate(str(Path(appdir) / "usr/bin/python3"))
+            add_candidate(str(Path(appdir) / "usr/bin/python"))
+        add_candidate("/usr/bin/kicad-python")
+        add_candidate("/usr/lib/kicad/python/bin/python3")
+        add_candidate("/usr/lib64/kicad/python/bin/python3")
+
+    for candidate in candidates:
+        if _python_can_import_web_deps(candidate):
+            return candidate
+
+    return None
 
 
 def _ensure_web_runtime_python() -> str:
@@ -344,7 +398,11 @@ def _start_web_server_for_session(token: str, progress_dialog=None) -> str:
     if app_script is None:
         raise RuntimeError("Web app script not found. Put app.py in the bundle root.")
 
-    python_exe = os.environ.get("FIBER_LASER_WEB_PYTHON", "").strip() or _ensure_web_runtime_python()
+    configured_python = os.environ.get("FIBER_LASER_WEB_PYTHON", "").strip()
+    if configured_python:
+        python_exe = configured_python
+    else:
+        python_exe = _detect_web_runtime_python() or _ensure_web_runtime_python()
     port = _find_free_port()
     base_url = f"http://127.0.0.1:{port}/"
 
