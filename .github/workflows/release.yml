@@ -67,34 +67,114 @@ jobs:
 
           cp packaging/icon.png package/resources/icon.png
 
-          cp packaging/metadata.template.json package/metadata.json
+          export VERSION_NO_V ZIP_NAME DOWNLOAD_URL
 
-          python3 - <<PY
+          python3 - <<'PY'
+          import copy
           import json
+          import os
+          import subprocess
+          from pathlib import Path
 
-          path = "package/metadata.json"
-          with open(path, "r", encoding="utf-8") as f:
-              metadata = json.load(f)
+          version = os.environ["VERSION_NO_V"]
+          zip_name = os.environ["ZIP_NAME"]
+          download_url = os.environ["DOWNLOAD_URL"]
 
-          metadata["versions"][0]["version"] = "${VERSION_NO_V}"
-          metadata["versions"][0]["download_url"] = "${DOWNLOAD_URL}"
+          package_dir = Path("package")
+          release_dir = Path("release")
+          metadata_path = package_dir / "metadata.json"
+          zip_path = release_dir / zip_name
 
-          with open(path, "w", encoding="utf-8") as f:
-              json.dump(metadata, f, indent=2)
-              f.write("\n")
+          with open("packaging/metadata.template.json", "r", encoding="utf-8") as f:
+              template = json.load(f)
+
+          with open("packaging/packages.json", "r", encoding="utf-8") as f:
+              packages = json.load(f)
+
+          package_entry = next(
+              (pkg for pkg in packages.get("packages", []) if pkg.get("identifier") == template["identifier"]),
+              None,
+          )
+          if package_entry is None:
+              raise RuntimeError("package entry not found in packaging/packages.json")
+
+          required = ("download_sha256", "download_url", "download_size", "install_size")
+          history = [
+              version_entry
+              for version_entry in package_entry.get("versions", [])
+              if version_entry.get("version") != version
+              and all(version_entry.get(key) not in (None, "") for key in required)
+          ]
+
+          current = copy.deepcopy(template["versions"][0])
+          current["version"] = version
+          current["download_url"] = download_url
+          current["download_size"] = 0
+          current["install_size"] = 0
+
+          def write_metadata() -> None:
+              metadata = copy.deepcopy(template)
+              metadata["versions"] = [current, *history]
+              with metadata_path.open("w", encoding="utf-8") as f:
+                  json.dump(metadata, f, indent=2)
+                  f.write("\n")
+
+          for _ in range(20):
+              write_metadata()
+
+              install_size = int(
+                  subprocess.check_output(["du", "-sb", str(package_dir)], text=True).split()[0]
+              )
+              if install_size != current["install_size"]:
+                  current["install_size"] = install_size
+                  continue
+
+              subprocess.run(
+                  ["zip", "-r", str(zip_path), "."],
+                  cwd=package_dir,
+                  check=True,
+                  stdout=subprocess.DEVNULL,
+              )
+              download_size = zip_path.stat().st_size
+              if download_size != current["download_size"]:
+                  current["download_size"] = download_size
+                  continue
+
+              break
+          else:
+              raise RuntimeError("metadata size fixed-point did not converge")
+
+          write_metadata()
+          subprocess.run(["python3", "-m", "json.tool", str(metadata_path)], check=True, stdout=subprocess.DEVNULL)
+          subprocess.run(["cp", str(metadata_path), str(release_dir / "metadata.json")], check=True)
+          subprocess.run(["python3", "-m", "json.tool", str(release_dir / "metadata.json")], check=True, stdout=subprocess.DEVNULL)
           PY
 
-          python3 -m json.tool package/metadata.json > /dev/null
-
-          cp package/metadata.json release/metadata.json
-          python3 -m json.tool release/metadata.json > /dev/null
-
-          (
-            cd package
-            zip -r "../release/${ZIP_NAME}" .
-          )
-
           sha256sum "release/${ZIP_NAME}" > "release/${ZIP_NAME}.sha256"
+
+            python3 - <<'PY'
+            import json
+            import os
+            from pathlib import Path
+
+            zip_name = os.environ["ZIP_NAME"]
+            metadata_path = Path("release/metadata.json")
+            sha256_path = Path(f"release/{zip_name}.sha256")
+
+            with sha256_path.open("r", encoding="utf-8") as f:
+              download_sha256 = f.read().split()[0]
+
+            with metadata_path.open("r", encoding="utf-8") as f:
+              metadata = json.load(f)
+
+            metadata["versions"][0]["download_sha256"] = download_sha256
+
+            with metadata_path.open("w", encoding="utf-8") as f:
+              json.dump(metadata, f, indent=2)
+              f.write("\n")
+            PY
+
+            python3 -m json.tool release/metadata.json > /dev/null
 
           echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
 
