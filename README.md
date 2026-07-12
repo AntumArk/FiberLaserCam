@@ -120,6 +120,20 @@ If the button does not appear:
 - Check KiCad's plugin console for Python import errors.
 - Re-run plugin refresh after any file changes.
 
+### PCM Package Notes
+
+- KiCad toolbar button icon and PCM package icon are different assets.
+- Toolbar icon comes from `plugins/icon_fiber_laser.xpm`.
+- PCM package icon comes from `resources/icon.png` inside the release zip.
+- PCM icon source file is `packaging/icon.png`.
+- Metadata source file is `packaging/metadata.template.json`.
+
+About metadata `kicad_version`:
+
+- `kicad_version: "9.0"` means minimum supported KiCad version is 9.0.
+- It does not limit the workflow build itself to only KiCad 9.
+- Because no `kicad_version_max` is set, newer KiCad versions can still install it.
+
 Launcher behavior:
 
 - Shows a KiCad dialog with per-layer persistent settings.

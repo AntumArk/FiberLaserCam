@@ -52,42 +52,29 @@ jobs:
           VERSION_NO_V="${{ steps.vars.outputs.version_no_v }}"
 
           rm -rf package release
-          mkdir -p package/plugins release
+          mkdir -p package/plugins package/resources release
 
           cp -a ./*.py package/plugins/
           cp -a LICENSE README.md requirements.txt icon_fiber_laser.xpm package/plugins/
           cp -a static templates img package/plugins/
 
-          cat > package/metadata.json <<EOF
-          {
-            "\$schema": "https://go.kicad.org/pcm/schemas/v2",
-            "name": "FiberLaserCam",
-            "description": "DXF hatch and contour-offset workflow plugin for KiCad PCB fabrication prep.",
-            "description_full": "FiberLaserCam exports KiCad PCB geometry to DXF and generates hatch lines or contour offsets for downstream fiber laser workflows. It supports direct export and web preview tuning.",
-            "identifier": "com.github.antumark.fiberlasercam",
-            "type": "plugin",
-            "author": {
-              "name": "AntumArk",
-              "contact": {
-                "web": "https://github.com/AntumArk/FiberLaserCam"
-              }
-            },
-            "license": "Apache-2.0",
-            "resources": {
-              "homepage": "https://github.com/AntumArk/FiberLaserCam",
-              "repository": "https://github.com/AntumArk/FiberLaserCam",
-              "issues": "https://github.com/AntumArk/FiberLaserCam/issues"
-            },
-            "versions": [
-              {
-                "version": "${VERSION_NO_V}",
-                "status": "stable",
-                "kicad_version": "9.0",
-                "runtime": "swig"
-              }
-            ]
-          }
-          EOF
+            cp packaging/icon.png package/resources/icon.png
+
+          cp packaging/metadata.template.json package/metadata.json
+
+          python3 - <<PY
+          import json
+
+          path = "package/metadata.json"
+          with open(path, "r", encoding="utf-8") as f:
+              metadata = json.load(f)
+
+          metadata["versions"][0]["version"] = "${VERSION_NO_V}"
+
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(metadata, f, indent=2)
+              f.write("\n")
+          PY
 
           python3 -m json.tool package/metadata.json > /dev/null
 
