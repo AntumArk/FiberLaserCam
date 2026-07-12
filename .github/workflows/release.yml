@@ -136,7 +136,7 @@ jobs:
                   check=True,
                   stdout=subprocess.DEVNULL,
               )
-                download_size = release_zip_path.stat().st_size
+              download_size = release_zip_path.stat().st_size
               if download_size != current["download_size"]:
                   current["download_size"] = download_size
                   continue
