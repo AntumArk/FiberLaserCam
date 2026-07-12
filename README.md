@@ -1,31 +1,26 @@
 # Fiber Laser DXF Hatch Tool
 
-Local Python web app for converting selected closed DXF zones into hatch lines for fiber laser etching.
+KiCad plugin for converting PCB geometry into hatch lines or contour offsets for fiber laser etching, with a built-in preview and export dialog.
 
 ## Quick Start (With Pictures)
 
 1. In KiCad PCB Editor, click the Fiber Laser plugin button.
-2. In the settings dialog, choose the layer and export action.
+2. In the settings dialog, choose the layer, mode, and parameters.
 3. For full-board cleanup, select `Edge.Cuts` and enable `Outer zone only (largest polygon)`.
-4. Use `web_preview` to tune interactively, or `direct_export` to save immediately.
+4. Click **Preview** to review the output inline, or **Export** to save immediately.
 
-![Quick Start - KiCad Settings](img/SettingsMenu.png)
-
-5. In the browser view, verify zones/preview and export the final DXF.
-
-![Quick Start - Web Interface](img/Webinterface1.png)
+![Plugin Dialog](img/fiberLaserWindow.png)
 
 ## Features
 
-- Upload KiCad-generated DXF isolation files
 - Detect closed zones from polylines, circles, and closed linework
-- Visualize each zone with unique colors
-- Click zones to select/unselect for hatching
-- Preview generated hatch lines with controls:
+- Visualize each zone with unique colors inside the dialog
+- Select or deselect individual zones for processing
+- Preview generated hatch lines or contour offsets inline with controls:
   - Hatch angle (degrees)
   - Hatch spacing
   - Laser radius (inward offset)
-- Export a DXF with hatch lines added on layer `HATCH_GEN`
+- Export a DXF with hatch lines or offsets added on layer `HATCH_GEN`
 
 ## Preferred Workflow
 
@@ -33,9 +28,8 @@ The recommended entry point is the KiCad ActionPlugin.
 
 1. Click the Fiber Laser launcher button in KiCad PCB Editor.
 2. Pick the export layer. The default is `F.Cu`.
-3. The plugin exports a temporary DXF, starts the local web server, and opens your browser.
-4. Use the browser UI to select zones, tune hatch or contour settings, preview, and export.
-5. Closing the browser tab stops the temporary server automatically.
+3. Adjust hatch or contour parameters in the dialog.
+4. Use **Preview** to inspect the output, then **Export** when satisfied.
 
 ## Visual Guide
 
@@ -43,44 +37,22 @@ The recommended entry point is the KiCad ActionPlugin.
 
 ![Workflow Overview](img/WorkflowOverview.svg)
 
-### KiCad Settings Dialog
+### Plugin Dialog
 
-![KiCad Settings Dialog](img/SettingsMenu.png)
-
-### Web Interface
-
-![Web Interface - Main](img/Webinterface1.png)
-
-![Web Interface - Preview/Controls](img/Web2.png)
+![Plugin Dialog](img/fiberLaserWindow.png)
 
 ### Hatch Mode Behavior
 
 ![Hatch Mode Behavior](img/ModeBehavior.svg)
 
-## Run
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python app.py
-```
-
-Open: http://127.0.0.1:5000
-
-## Browser Defaults
-
-- Hatch spacing defaults to `0.02 mm`.
-- Contour offset start defaults to `0.02 mm`.
-- Contour offset spacing defaults to `0.02 mm`.
-
 ## Notes
 
-- Works best with DXF files containing closed contours or linework that forms closed polygons.
-- Very complex DXF files may produce many tiny zones; use click selection to choose only desired areas.
+- Works best with PCB geometry containing closed contours or linework that forms closed polygons.
+- Very complex boards may produce many tiny zones; use zone selection in the dialog to choose only desired areas.
 
 ## KiCad Plugin
 
-A KiCad ActionPlugin lives in the repo root and launches the browser workflow from KiCad, exports the selected layer to DXF, and then hands off control to the local web app.
+A KiCad ActionPlugin lives in the repo root. It exports the selected layer to DXF and processes it in a built-in dialog with preview and export controls.
 
 ### Install As KiCad Plugin
 
@@ -159,37 +131,21 @@ About metadata `kicad_version`:
   writing is handled by the bundled `minidxf.py` (plain Python, no numpy or
   other compiled extensions), so nothing needs to be installed or bundled
   in a `.deps` folder.
-- The standalone Flask web app (`app.py`, optional, not used by the KiCad
-  plugin) still requires `Flask`.
 
 AppImage note (Linux):
 
-- When KiCad runs from AppImage, `APPDIR` is usually set and the plugin now probes `APPDIR/usr/bin/python3` automatically.
-- You can still override manually by setting `FIBER_LASER_WEB_PYTHON`.
-
-Example (Linux):
-
-```bash
-export FIBER_LASER_WEB_PYTHON=/path/to/kicad/python
-```
-
-The optional standalone Flask web app is not bundled by the release workflow; install it separately if you use `app.py`:
-
-```bash
-python3 -m pip install Flask==3.0.3
-```
+- When KiCad runs from AppImage, `APPDIR` is usually set and the plugin probes `APPDIR/usr/bin/python3` automatically.
 
 Launcher behavior:
 
-- Shows a KiCad dialog with per-layer persistent settings.
+- Shows a built-in KiCad dialog with per-layer persistent settings.
 - Saves mode and parameters per layer (hatch or contour offset).
-- Supports two actions: `web_preview` (open browser) and `direct_export` (export immediately without preview).
-- Passes selected layer and mode/parameter hints to the web app via query parameters.
+- Supports two actions: `preview` (open built-in dialog) and `direct_export` (export immediately without preview).
 - Stores temporary exported DXF files in `temp_dxf/`.
 
 ### Settings Reference And Cutting Impact
 
-These settings exist in the KiCad launcher dialog and/or browser UI. The cutting impact notes describe common real-world outcomes when values are too aggressive.
+These settings exist in the KiCad plugin dialog. The cutting impact notes describe common real-world outcomes when values are too aggressive.
 
 #### Core Launcher Settings
 
@@ -198,8 +154,8 @@ These settings exist in the KiCad launcher dialog and/or browser UI. The cutting
   - Cutting impact: wrong layer can include geometry you did not intend to process.
 
 - `Action`
-  - `web_preview`: open browser, inspect zones, preview output before export.
-  - `direct_export`: run export immediately without browser interaction.
+  - `preview`: open the built-in dialog, inspect zones, and preview output before export.
+  - `direct_export`: run export immediately without interactive preview.
   - Cutting impact: direct export is faster but easier to run with unsafe density if settings were not checked.
 
 - `Hatching mode`
@@ -288,11 +244,8 @@ Keep the top-level bundle layout together when installing or packaging:
 - `offline_export.py`
 - `contour_offsets.py`
 - `icon_fiber_laser.xpm`
-- `app.py`
-- `templates/`
-- `static/`
 
-That is the clean install shape, so the browser app and the KiCad launcher stay side by side in the same folder tree.
+That is the clean install shape for the KiCad plugin.
 
 ## License
 
