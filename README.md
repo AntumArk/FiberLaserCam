@@ -119,16 +119,21 @@ If the button does not appear:
 - Check KiCad's plugin console for Python import errors.
 - Re-run plugin refresh after any file changes.
 
-### Offline Export AppImage (No KiCad Required)
+### Standalone AppImage (No KiCad Required)
 
-Each GitHub release also publishes `FiberLaserCam-OfflineExport-<version>-x86_64.AppImage`, a standalone Linux executable that generates contour-offset DXF loops from a source DXF without needing KiCad installed. It requires only a system `python3` (the underlying code has zero third-party dependencies).
+Each GitHub release also publishes `FiberLaserCam-<version>-x86_64.AppImage`, a standalone Linux executable that generates contour-offset loops or angled hatch fill from a source DXF without needing KiCad installed. It requires only a system `python3` (the underlying code has zero third-party dependencies).
 
 ```bash
-chmod +x FiberLaserCam-OfflineExport-*.AppImage
-./FiberLaserCam-OfflineExport-*.AppImage source.dxf output.dxf --start-offset 1.0 --spacing 1.0 --repetitions 3 --layer-name HATCH_GEN
+chmod +x FiberLaserCam-*.AppImage
+
+# Contour offsets (default mode), start/spacing in microns, default layer F.Cu
+./FiberLaserCam-*.AppImage source.dxf output.dxf -s 20 -i 20 -n 3
+
+# Hatch fill
+./FiberLaserCam-*.AppImage source.dxf output.dxf --mode hatch --angle 45 -i 2000
 ```
 
-Run with `--help` for the full option list. This tool wraps `offline_export.generate_contour_offset_dxf()`, the same function used internally by the KiCad plugin.
+Short options: `-s` start offset, `-i` spacing (both in microns), `-n` repetitions. Add `--invert` to offset outward instead of inward. Run with `--help` for the full option list. This tool wraps `offline_export.generate_contour_offset_dxf()` / `generate_hatch_dxf()`, the same functions used internally by the KiCad plugin.
 
 
 ### PCM Package Notes

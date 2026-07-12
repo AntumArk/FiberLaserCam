@@ -41,6 +41,22 @@ else
   new_tag="v${major}.${minor}.${patch}"
 fi
 
+new_version="${new_tag#v}"
+
+repo_root="$(git rev-parse --show-toplevel)"
+ledger="packaging/packages.json"
+
+if ! python3 "${repo_root}/packaging/update_packages_json.py" --version "${new_version}"; then
+  echo "pre-push: failed to update ${ledger}, aborting" >&2
+  exit 1
+fi
+
+git add "${ledger}"
+if ! git diff --cached --quiet -- "${ledger}"; then
+  echo "pre-push: recording ${new_tag} placeholder in ${ledger}"
+  git commit -m "chore: add ${new_tag} placeholder to packages.json"
+fi
+
 echo "pre-push: creating and pushing tag ${new_tag}"
 git tag "${new_tag}"
-SKIP_AUTO_TAG=1 git push "${remote}" "${new_tag}"
+SKIP_AUTO_TAG=1 git push "${remote}" HEAD:main "${new_tag}"

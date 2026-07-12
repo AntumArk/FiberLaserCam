@@ -100,65 +100,30 @@ jobs:
           set -euo pipefail
 
           VERSION="${{ steps.vars.outputs.version }}"
+          VERSION_NO_V="${{ steps.vars.outputs.version_no_v }}"
           ZIP_NAME="${{ steps.build.outputs.zip_name }}"
           REPO="${{ github.repository }}"
 
           # download_url is pinned to this specific tag's release asset, so it
           # keeps working forever even after newer releases are published.
-          export DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ZIP_NAME}"
-          export DOWNLOAD_SHA256
+          DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ZIP_NAME}"
           DOWNLOAD_SHA256="$(cut -d' ' -f1 "release/${ZIP_NAME}.sha256")"
-          export DOWNLOAD_SIZE
           DOWNLOAD_SIZE="$(stat -c%s "release/${ZIP_NAME}")"
-          export INSTALL_SIZE
           INSTALL_SIZE="$(du -sb package | cut -f1)"
 
-          # Pull the previously published packages.json (served from the
-          # "latest" release alias) so version history accumulates across
-          # releases instead of being overwritten. Missing on first release.
-          curl -fsSL "https://github.com/${REPO}/releases/latest/download/packages.json" \
-            -o prev_packages.json || echo '{"packages": []}' > prev_packages.json
+          # packaging/packages.json is the git-tracked source of truth for
+          # version history (kept in sync by .githooks/pre-push and by this
+          # step), so no network fetch of a previous release asset is needed
+          # here and no version history can be lost to release-ordering races.
+          python3 packaging/update_packages_json.py \
+            --version "${VERSION_NO_V}" \
+            --download-sha256 "${DOWNLOAD_SHA256}" \
+            --download-url "${DOWNLOAD_URL}" \
+            --download-size "${DOWNLOAD_SIZE}" \
+            --install-size "${INSTALL_SIZE}"
 
-          python3 - <<'PY'
-          import json
-          import os
-
-          with open("package/metadata.json", "r", encoding="utf-8") as f:
-              metadata = json.load(f)
-
-          version_entry = dict(metadata["versions"][0])
-          version_entry["download_sha256"] = os.environ["DOWNLOAD_SHA256"]
-          version_entry["download_url"] = os.environ["DOWNLOAD_URL"]
-          version_entry["download_size"] = int(os.environ["DOWNLOAD_SIZE"])
-          version_entry["install_size"] = int(os.environ["INSTALL_SIZE"])
-
-          with open("prev_packages.json", "r", encoding="utf-8") as f:
-              repo_index = json.load(f)
-
-          packages = repo_index.get("packages", [])
-          identifier = metadata["identifier"]
-
-          existing = next((p for p in packages if p.get("identifier") == identifier), None)
-          if existing is None:
-              existing = {k: v for k, v in metadata.items() if k != "versions"}
-              existing["versions"] = []
-              packages.append(existing)
-          else:
-              for key, value in metadata.items():
-                  if key != "versions":
-                      existing[key] = value
-
-          existing["versions"] = [
-              v for v in existing["versions"] if v.get("version") != version_entry["version"]
-          ]
-          existing["versions"].insert(0, version_entry)
-
-          with open("release/packages.json", "w", encoding="utf-8") as f:
-              json.dump({"packages": packages}, f, indent=2)
-              f.write("\n")
-          PY
-
-          python3 -m json.tool release/packages.json > /dev/null
+          python3 -m json.tool packaging/packages.json > /dev/null
+          cp packaging/packages.json release/packages.json
 
           export PACKAGES_SHA256
           PACKAGES_SHA256="$(sha256sum release/packages.json | cut -d' ' -f1)"
@@ -173,7 +138,7 @@ jobs:
           import os
 
           repository = {
-              "$schema": "https://go.kicad.org/pcm/schemas/v2#/definitions/Repository",
+              "$schema": "https://go.kicad.org/pcm/schemas/v1#/definitions/Repository",
               "name": "FiberLaserCam repository",
               "maintainer": {
                   "name": "AntumArk",
@@ -185,7 +150,6 @@ jobs:
                   "update_timestamp": int(os.environ["UPDATE_TIMESTAMP"]),
                   "update_time_utc": os.environ["UPDATE_TIME_UTC"],
               },
-              "schema_version": 2,
           }
 
           with open("release/repository.json", "w", encoding="utf-8") as f:
@@ -195,7 +159,7 @@ jobs:
 
           python3 -m json.tool release/repository.json > /dev/null
 
-      - name: Build offline-export AppImage
+      - name: Build AppImage
         id: appimage
         shell: bash
         run: |
@@ -211,15 +175,15 @@ jobs:
 
           cp packaging/appimage/AppRun "${APPDIR}/AppRun"
           chmod +x "${APPDIR}/AppRun"
-          cp packaging/appimage/fiberlasercam-offline-export.desktop "${APPDIR}/fiberlasercam-offline-export.desktop"
-          cp packaging/icon.png "${APPDIR}/fiberlasercam-offline-export.png"
-          cp packaging/icon.png "${APPDIR}/usr/share/icons/hicolor/256x256/apps/fiberlasercam-offline-export.png"
+          cp packaging/appimage/fiberlasercam.desktop "${APPDIR}/fiberlasercam.desktop"
+          cp packaging/icon.png "${APPDIR}/fiberlasercam.png"
+          cp packaging/icon.png "${APPDIR}/usr/share/icons/hicolor/256x256/apps/fiberlasercam.png"
 
           curl -fsSL -o appimagetool \
             https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool
 
-          APPIMAGE_NAME="FiberLaserCam-OfflineExport-${VERSION}-x86_64.AppImage"
+          APPIMAGE_NAME="FiberLaserCam-${VERSION}-x86_64.AppImage"
           ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool "${APPDIR}" "release/${APPIMAGE_NAME}"
 
           sha256sum "release/${APPIMAGE_NAME}" > "release/${APPIMAGE_NAME}.sha256"
@@ -251,3 +215,35 @@ jobs:
             release/${{ steps.appimage.outputs.appimage_name }}
             release/${{ steps.appimage.outputs.appimage_name }}.sha256
           generate_release_notes: true
+
+      - name: Commit updated packages.json ledger
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # The checkout is a detached HEAD at the release tag, which may be
+          # behind main if other commits landed on main meanwhile. Replay our
+          # ledger update on top of the current main tip instead of force
+          # -pushing the tag's (possibly stale) history over it. This runs
+          # last so switching branches here can't affect any earlier build
+          # step's source tree.
+          cp release/packages.json /tmp/packages.json.new
+          git fetch origin main
+          git checkout -B main origin/main
+          cp /tmp/packages.json.new packaging/packages.json
+          python3 -m json.tool packaging/packages.json > /dev/null
+
+          git add packaging/packages.json
+          if git diff --cached --quiet; then
+            echo "packaging/packages.json already up to date on main, nothing to commit"
+            exit 0
+          fi
+          git commit -m "chore: record ${{ steps.vars.outputs.version }} in packages.json"
+
+          # Best-effort: this ledger commit is a convenience for future
+          # builds/pre-push runs. Don't fail the whole release if it can't
+          # be pushed (e.g. a race with another concurrent release).
+          git push origin HEAD:main || echo "warning: failed to push packages.json ledger update to main" >&2

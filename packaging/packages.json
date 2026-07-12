@@ -1,0 +1,77 @@
+{
+  "packages": [
+    {
+      "$schema": "https://go.kicad.org/pcm/schemas/v1",
+      "name": "FiberLaserCam",
+      "description": "DXF hatch and contour-offset workflow plugin for KiCad PCB fabrication prep.",
+      "description_full": "FiberLaserCam exports KiCad PCB geometry to DXF and generates hatch lines or contour offsets for downstream fiber laser workflows. Settings, zone selection, and a live in-window preview are all in a single native KiCad dialog.",
+      "identifier": "com.github.antumark.fiberlasercam",
+      "type": "plugin",
+      "author": {
+        "name": "AntumArk",
+        "contact": {
+          "web": "https://github.com/AntumArk/FiberLaserCam"
+        }
+      },
+      "license": "Apache-2.0",
+      "resources": {
+        "homepage": "https://github.com/AntumArk/FiberLaserCam",
+        "repository": "https://github.com/AntumArk/FiberLaserCam",
+        "issues": "https://github.com/AntumArk/FiberLaserCam/issues",
+        "download": "https://github.com/AntumArk/FiberLaserCam"
+      },
+      "versions": [
+        {
+          "version": "0.1.13",
+          "status": "stable",
+          "kicad_version": "9.0",
+          "runtime": "swig",
+          "download_sha256": "115bd93a592ae16b6bc5647c188bcc6866c696cbd509c8234d556c90ce30bcc5",
+          "download_url": "https://github.com/AntumArk/FiberLaserCam/releases/download/v0.1.13/FiberLaserCam-v0.1.13-kicad-plugin.zip",
+          "download_size": 252518,
+          "install_size": 338220
+        },
+        {
+          "version": "0.1.12",
+          "status": "stable",
+          "kicad_version": "9.0",
+          "runtime": "swig",
+          "download_sha256": "a4f4e1521b2600db3c9daed0f1407fd73705730043bf99afb04f67e4e899d2f8",
+          "download_url": "https://github.com/AntumArk/FiberLaserCam/releases/download/v0.1.12/FiberLaserCam-v0.1.12-kicad-plugin.zip",
+          "download_size": 251756,
+          "install_size": 335995
+        },
+        {
+          "version": "0.1.11",
+          "status": "stable",
+          "kicad_version": "9.0",
+          "runtime": "swig",
+          "download_sha256": "071f81a0d50d3b101155e8e6c91852c52619f934f5d75dce2a7f2b06a7eb722d",
+          "download_url": "https://github.com/AntumArk/FiberLaserCam/releases/download/v0.1.11/FiberLaserCam-v0.1.11-kicad-plugin.zip",
+          "download_size": 252146,
+          "install_size": 336963
+        },
+        {
+          "version": "0.1.10",
+          "status": "stable",
+          "kicad_version": "9.0",
+          "runtime": "swig",
+          "download_sha256": "8ab99ce43ab5dd208f2ee920b07b9d3b3224798a22674bf9a19f1d83cf4704cb",
+          "download_url": "https://github.com/AntumArk/FiberLaserCam/releases/download/v0.1.10/FiberLaserCam-v0.1.10-kicad-plugin.zip",
+          "download_size": 251956,
+          "install_size": 336486
+        },
+        {
+          "version": "0.1.9",
+          "status": "stable",
+          "kicad_version": "9.0",
+          "runtime": "swig",
+          "download_sha256": "e2219063d0f810bdf065ada3eabe41e2820ce07a743e0dc9ae2a0fb84e6be22d",
+          "download_url": "https://github.com/AntumArk/FiberLaserCam/releases/download/v0.1.9/FiberLaserCam-v0.1.9-kicad-plugin.zip",
+          "download_size": 9232453,
+          "install_size": 33566504
+        }
+      ]
+    }
+  ]
+}
