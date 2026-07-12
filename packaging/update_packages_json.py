@@ -9,9 +9,9 @@ two places:
      fields available yet) to add a placeholder entry for the version it is
      about to tag, so the ledger always has a row for every released tag.
   2. The release.yml CI workflow calls this script again once the release
-     zip has actually been built and uploaded, this time passing the real
-     download_sha256/download_url/download_size/install_size, and commits
-     the result back to the repository.
+      zip has actually been built, this time passing the real
+      download_sha256/download_url/download_size/install_size, so the
+      release artifacts and repository metadata stay in sync.
 
 Using a single git-tracked ledger (instead of re-downloading the previous
 packages.json from the GitHub "latest" release alias on every build) avoids

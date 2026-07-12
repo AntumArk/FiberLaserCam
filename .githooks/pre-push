@@ -27,22 +27,6 @@ fi
 
 git fetch --tags --force "${remote}" >/dev/null 2>&1 || true
 
-# release.yml commits an updated packages.json ledger back to main after
-# every release, so local main can easily be behind origin/main by the time
-# the next push happens. Rebase onto the latest remote main first so our
-# own commit below (and the push at the end) fast-forward cleanly instead
-# of being rejected as a non-fast-forward/branch split.
-if git rev-parse -q --verify "${remote}/main" >/dev/null 2>&1; then
-  if ! git merge-base --is-ancestor "${remote}/main" HEAD; then
-    echo "pre-push: local main is behind ${remote}/main; rebasing onto it..."
-    if ! git rebase "${remote}/main"; then
-      echo "pre-push: automatic rebase onto ${remote}/main failed (conflicts)." >&2
-      echo "pre-push: resolve manually (see 'git status'), then re-run git push." >&2
-      exit 1
-    fi
-  fi
-fi
-
 latest_tag="$(git tag --list 'v*.*.*' | sort -V | tail -n1)"
 
 if [[ -z "${latest_tag}" ]]; then

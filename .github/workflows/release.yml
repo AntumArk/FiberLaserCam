@@ -83,7 +83,7 @@ jobs:
           package_dir = Path("package")
           release_dir = Path("release")
           metadata_path = package_dir / "metadata.json"
-          zip_path = release_dir / zip_name
+          zip_path = package_dir.parent / release_dir / zip_name
 
           with open("packaging/metadata.template.json", "r", encoding="utf-8") as f:
               template = json.load(f)
@@ -152,29 +152,29 @@ jobs:
 
           sha256sum "release/${ZIP_NAME}" > "release/${ZIP_NAME}.sha256"
 
-            python3 - <<'PY'
-            import json
-            import os
-            from pathlib import Path
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
 
-            zip_name = os.environ["ZIP_NAME"]
-            metadata_path = Path("release/metadata.json")
-            sha256_path = Path(f"release/{zip_name}.sha256")
+          zip_name = os.environ["ZIP_NAME"]
+          metadata_path = Path("release/metadata.json")
+          sha256_path = Path(f"release/{zip_name}.sha256")
 
-            with sha256_path.open("r", encoding="utf-8") as f:
+          with sha256_path.open("r", encoding="utf-8") as f:
               download_sha256 = f.read().split()[0]
 
-            with metadata_path.open("r", encoding="utf-8") as f:
+          with metadata_path.open("r", encoding="utf-8") as f:
               metadata = json.load(f)
 
-            metadata["versions"][0]["download_sha256"] = download_sha256
+          metadata["versions"][0]["download_sha256"] = download_sha256
 
-            with metadata_path.open("w", encoding="utf-8") as f:
+          with metadata_path.open("w", encoding="utf-8") as f:
               json.dump(metadata, f, indent=2)
               f.write("\n")
-            PY
+          PY
 
-            python3 -m json.tool release/metadata.json > /dev/null
+          python3 -m json.tool release/metadata.json > /dev/null
 
           echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
 
@@ -305,34 +305,3 @@ jobs:
             release/${{ steps.appimage.outputs.appimage_name }}.sha256
           generate_release_notes: true
 
-      - name: Commit updated packages.json ledger
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # The checkout is a detached HEAD at the release tag, which may be
-          # behind main if other commits landed on main meanwhile. Replay our
-          # ledger update on top of the current main tip instead of force
-          # -pushing the tag's (possibly stale) history over it. This runs
-          # last so switching branches here can't affect any earlier build
-          # step's source tree.
-          cp release/packages.json /tmp/packages.json.new
-          git fetch origin main
-          git checkout -B main origin/main
-          cp /tmp/packages.json.new packaging/packages.json
-          python3 -m json.tool packaging/packages.json > /dev/null
-
-          git add packaging/packages.json
-          if git diff --cached --quiet; then
-            echo "packaging/packages.json already up to date on main, nothing to commit"
-            exit 0
-          fi
-          git commit -m "chore: record ${{ steps.vars.outputs.version }} in packages.json"
-
-          # Best-effort: this ledger commit is a convenience for future
-          # builds/pre-push runs. Don't fail the whole release if it can't
-          # be pushed (e.g. a race with another concurrent release).
-          git push origin HEAD:main || echo "warning: failed to push packages.json ledger update to main" >&2
