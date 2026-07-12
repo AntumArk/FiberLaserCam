@@ -61,7 +61,7 @@ jobs:
 
           cp -a ./*.py package/plugins/
           cp -a LICENSE README.md requirements.txt icon_fiber_laser.xpm package/plugins/
-          cp -a static templates img package/plugins/
+          cp -a img package/plugins/
 
           python3 -m pip install --upgrade pip
           python3 -m pip install --only-binary=:all: --prefer-binary --target package/plugins/.deps -r requirements.txt
