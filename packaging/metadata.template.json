@@ -2,7 +2,7 @@
   "$schema": "https://go.kicad.org/pcm/schemas/v2",
   "name": "FiberLaserCam",
   "description": "DXF hatch and contour-offset workflow plugin for KiCad PCB fabrication prep.",
-  "description_full": "FiberLaserCam exports KiCad PCB geometry to DXF and generates hatch lines or contour offsets for downstream fiber laser workflows. It supports direct export and web preview tuning.",
+  "description_full": "FiberLaserCam exports KiCad PCB geometry to DXF and generates hatch lines or contour offsets for downstream fiber laser workflows. Settings, zone selection, and a live in-window preview are all in a single native KiCad dialog.",
   "identifier": "com.github.antumark.fiberlasercam",
   "type": "plugin",
   "author": {
