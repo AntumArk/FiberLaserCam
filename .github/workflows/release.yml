@@ -83,7 +83,8 @@ jobs:
           package_dir = Path("package")
           release_dir = Path("release")
           metadata_path = package_dir / "metadata.json"
-          zip_path = package_dir.parent / release_dir / zip_name
+          zip_output_path = Path("..") / release_dir / zip_name
+          release_zip_path = release_dir / zip_name
 
           with open("packaging/metadata.template.json", "r", encoding="utf-8") as f:
               template = json.load(f)
@@ -130,12 +131,12 @@ jobs:
                   continue
 
               subprocess.run(
-                  ["zip", "-r", str(zip_path), "."],
+                  ["zip", "-r", str(zip_output_path), "."],
                   cwd=package_dir,
                   check=True,
                   stdout=subprocess.DEVNULL,
               )
-              download_size = zip_path.stat().st_size
+                download_size = release_zip_path.stat().st_size
               if download_size != current["download_size"]:
                   current["download_size"] = download_size
                   continue
