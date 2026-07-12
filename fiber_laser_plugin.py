@@ -13,7 +13,7 @@ from pathlib import Path
 import pcbnew
 import wx
 
-import ezdxf
+import minidxf as ezdxf
 from app_geometry import (
     DEFAULT_MIN_HATCH_AREA,
     build_contour_loops_for_selection,

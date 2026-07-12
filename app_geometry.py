@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-import ezdxf
+import minidxf as ezdxf
 from contour_offsets import generate_contour_offset_loops, generate_contour_offset_segments
 
 from app_sessions import UploadSession
@@ -166,7 +166,7 @@ def _polygonize_segments(segments: list[tuple[Point, Point]], tol: float = 1e-4)
     return loops
 
 
-def collect_entities_as_polygons(doc: ezdxf.document.Drawing) -> list[Ring]:
+def collect_entities_as_polygons(doc: ezdxf.Drawing) -> list[Ring]:
     modelspace = doc.modelspace()
     direct_polys: list[Ring] = []
     linework: list[tuple[Point, Point]] = []

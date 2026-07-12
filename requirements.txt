@@ -1,9 +1,0 @@
-# We only use ezdxf's DXF read/write core (ezdxf.readfile, ezdxf.new,
-# modelspace add_line/add_lwpolyline/add_polyline2d). numpy and fonttools
-# are declared as hard dependencies by ezdxf on PyPI, but are never
-# imported for this narrow usage, so we install with --no-deps in CI and
-# only bundle these two small pure-python packages that ezdxf's core
-# actually needs at import time.
-ezdxf==1.4.2
-pyparsing>=3.0.0
-typing_extensions>=4.6.0

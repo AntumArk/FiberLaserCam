@@ -57,26 +57,11 @@ jobs:
           VERSION_NO_V="${{ steps.vars.outputs.version_no_v }}"
 
           rm -rf package release
-          mkdir -p package/plugins/.deps package/resources release
+          mkdir -p package/plugins package/resources release
 
           cp -a ./*.py package/plugins/
-          cp -a LICENSE README.md requirements.txt icon_fiber_laser.xpm package/plugins/
+          cp -a LICENSE README.md icon_fiber_laser.xpm package/plugins/
           cp -a img package/plugins/
-
-          python3 -m pip install --upgrade pip
-
-          # ezdxf declares numpy and fonttools as hard dependencies on PyPI,
-          # but this plugin only uses ezdxf's core DXF read/write API
-          # (ezdxf.readfile, ezdxf.new, add_line/add_lwpolyline/add_polyline2d),
-          # which never touches numpy or fonttools.
-          # Installing with --no-deps keeps the bundled .deps folder small and
-          # avoids shipping numpy's platform/ABI-specific compiled wheels,
-          # which previously caused silent plugin load failures whenever a
-          # user's KiCad-bundled Python didn't match the CI runner's ABI.
-          # ezdxf's own optional compiled accelerators (ezdxf/acc/*.so) degrade
-          # gracefully to a pure-python fallback when their ABI doesn't match,
-          # so a single flat .deps folder works across all Python versions.
-          python3 -m pip install --only-binary=:all: --prefer-binary --no-deps --target package/plugins/.deps -r requirements.txt
 
           cp packaging/icon.png package/resources/icon.png
 

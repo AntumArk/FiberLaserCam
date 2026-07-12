@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import ezdxf
+import minidxf as ezdxf
 from app_geometry import collect_entities_as_polygons
 
 try:
@@ -11,7 +11,7 @@ except ImportError:
     from kicad_plugin.contour_offsets import generate_contour_offset_loops
 
 
-def _collect_polygons_from_dxf(doc: ezdxf.document.Drawing) -> list[list[tuple[float, float]]]:
+def _collect_polygons_from_dxf(doc: ezdxf.Drawing) -> list[list[tuple[float, float]]]:
     return collect_entities_as_polygons(doc)
 
 

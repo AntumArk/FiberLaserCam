@@ -62,7 +62,6 @@ The recommended entry point is the KiCad ActionPlugin.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
 python app.py
 ```
 
@@ -136,13 +135,12 @@ About metadata `kicad_version`:
 
 ### Runtime Dependencies And KiCad Interpreter
 
-- Required runtime packages are `Flask` and `ezdxf`.
-- `ezdxf` is still required because this tool reads exported DXF geometry and also writes the final output DXF with generated entities.
-- The plugin can run its web app using KiCad's Python interpreter by setting `FIBER_LASER_WEB_PYTHON`.
-- This plugin does not create virtual environments and does not install packages at runtime.
-- The expected model is a self-contained plugin bundle with dependencies already present in plugin-local `.deps`.
-- If `FIBER_LASER_WEB_PYTHON` is not set, the plugin auto-detects a usable interpreter (including KiCad/system Python) and uses it only if it can import the bundled dependencies.
-- Bundled dependencies are selected by Python ABI, for example `.deps/cp311` and `.deps/cp313`.
+- The KiCad plugin has no third-party runtime dependencies. DXF reading and
+  writing is handled by the bundled `minidxf.py` (plain Python, no numpy or
+  other compiled extensions), so nothing needs to be installed or bundled
+  in a `.deps` folder.
+- The standalone Flask web app (`app.py`, optional, not used by the KiCad
+  plugin) still requires `Flask`.
 
 AppImage note (Linux):
 
