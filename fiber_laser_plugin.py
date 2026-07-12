@@ -227,36 +227,6 @@ def _find_web_app_script() -> Path | None:
     return None
 
 
-def _load_dependency_specs() -> list[str]:
-    req_candidates = [
-        Path(os.environ.get("FIBER_LASER_REQUIREMENTS_FILE", "").strip()) if os.environ.get("FIBER_LASER_REQUIREMENTS_FILE") else None,
-        PLUGIN_DIR / "requirements.txt",
-    ]
-
-    names = {"ezdxf", "shapely", "flask"}
-    for req in req_candidates:
-        if not req or not req.exists():
-            continue
-        picked: list[str] = []
-        try:
-            for raw in req.read_text(encoding="utf-8", errors="ignore").splitlines():
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                pkg = re.split(r"[<>=!~]", line, maxsplit=1)[0].strip().lower()
-                if pkg in names:
-                    picked.append(line)
-        except Exception:
-            continue
-
-        if picked:
-            if not any(re.split(r"[<>=!~]", s, maxsplit=1)[0].strip().lower() == "flask" for s in picked):
-                picked.append("Flask==3.0.3")
-            return picked
-
-    return ["ezdxf==1.4.4", "shapely==2.0.7", "Flask==3.0.3"]
-
-
 def _python_can_import_web_deps(python_exe: str) -> bool:
     if not python_exe:
         return False
@@ -276,7 +246,7 @@ def _python_can_import_web_deps(python_exe: str) -> bool:
     return check.returncode == 0
 
 
-def _detect_web_runtime_python() -> str | None:
+def _runtime_python_candidates() -> list[str]:
     candidates: list[str] = []
     seen: set[str] = set()
 
@@ -305,7 +275,11 @@ def _detect_web_runtime_python() -> str | None:
         add_candidate("/usr/lib/kicad/python/bin/python3")
         add_candidate("/usr/lib64/kicad/python/bin/python3")
 
-    for candidate in candidates:
+    return candidates
+
+
+def _detect_web_runtime_python() -> str | None:
+    for candidate in _runtime_python_candidates():
         if _python_can_import_web_deps(candidate):
             return candidate
 
@@ -313,55 +287,18 @@ def _detect_web_runtime_python() -> str | None:
 
 
 def _ensure_web_runtime_python() -> str:
-    web_venv = PLUGIN_DIR / ".webvenv"
-    python_exe = web_venv / "bin" / "python"
-    pip_exe = web_venv / "bin" / "pip"
+    detected = _detect_web_runtime_python()
+    if detected:
+        return detected
 
-    clean_env = dict(os.environ)
-    clean_env.pop("PYTHONHOME", None)
-    clean_env.pop("PYTHONPATH", None)
-
-    if not python_exe.exists():
-        create = subprocess.run(
-            ["/usr/bin/python3", "-m", "venv", str(web_venv)],
-            capture_output=True,
-            text=True,
-            env=clean_env,
-        )
-        if create.returncode != 0:
-            details = create.stderr.strip() or create.stdout.strip() or "Unknown venv creation failure."
-            raise RuntimeError(f"Failed to create web runtime venv:\n{details}")
-
-    verify = subprocess.run(
-        [str(python_exe), "-c", "import ezdxf, shapely, flask"],
-        capture_output=True,
-        text=True,
-        env=clean_env,
+    tried = "\n".join(f"- {candidate}" for candidate in _runtime_python_candidates())
+    raise RuntimeError(
+        "Failed to prepare a web runtime. No usable Python interpreter could import Flask, ezdxf, and shapely from the plugin bundle.\n\n"
+        "Tried interpreters:\n"
+        f"{tried}\n\n"
+        "This plugin expects bundled dependencies in the plugin-local .deps folder. Reinstall from a release package that includes .deps, "
+        "or set FIBER_LASER_WEB_PYTHON to a compatible interpreter that can import the bundled dependencies."
     )
-    if verify.returncode == 0:
-        return str(python_exe)
-
-    install = subprocess.run(
-        [str(pip_exe), "install", "--upgrade", "pip", *_load_dependency_specs()],
-        capture_output=True,
-        text=True,
-        env=clean_env,
-    )
-    if install.returncode != 0:
-        details = install.stderr.strip() or install.stdout.strip() or "Unknown pip install failure."
-        raise RuntimeError(f"Failed to install web runtime dependencies:\n{details}")
-
-    verify = subprocess.run(
-        [str(python_exe), "-c", "import ezdxf, shapely, flask"],
-        capture_output=True,
-        text=True,
-        env=clean_env,
-    )
-    if verify.returncode != 0:
-        details = verify.stderr.strip() or verify.stdout.strip() or "Unknown import verification failure."
-        raise RuntimeError(f"Web runtime dependency verification failed:\n{details}")
-
-    return str(python_exe)
 
 
 def _tail_log_file(log_path: Path, lines: int = 40) -> str:

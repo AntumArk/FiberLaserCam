@@ -22,6 +22,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Resolve release version
         id: vars
         shell: bash
@@ -52,13 +57,16 @@ jobs:
           VERSION_NO_V="${{ steps.vars.outputs.version_no_v }}"
 
           rm -rf package release
-          mkdir -p package/plugins package/resources release
+          mkdir -p package/plugins/.deps package/resources release
 
           cp -a ./*.py package/plugins/
           cp -a LICENSE README.md requirements.txt icon_fiber_laser.xpm package/plugins/
           cp -a static templates img package/plugins/
 
-            cp packaging/icon.png package/resources/icon.png
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --ignore-installed --only-binary=:all: --prefer-binary --target package/plugins/.deps -r requirements.txt
+
+          cp packaging/icon.png package/resources/icon.png
 
           cp packaging/metadata.template.json package/metadata.json
 

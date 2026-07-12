@@ -136,11 +136,13 @@ About metadata `kicad_version`:
 
 ### Runtime Dependencies And KiCad Interpreter
 
-- `numpy` is not required by this plugin runtime.
+- `numpy` is not imported directly by this plugin, but it is typically installed transitively because `shapely` depends on it.
 - Required runtime packages are `Flask`, `ezdxf`, and `shapely`.
 - `ezdxf` is still required because this tool reads exported DXF geometry and also writes the final output DXF with generated entities.
 - The plugin can run its web app using KiCad's Python interpreter by setting `FIBER_LASER_WEB_PYTHON`.
-- If `FIBER_LASER_WEB_PYTHON` is not set, the plugin auto-detects a usable interpreter (including KiCad/system Python) and falls back to its `.webvenv` only when needed.
+- This plugin does not create virtual environments and does not install packages at runtime.
+- The expected model is a self-contained plugin bundle with dependencies already present in plugin-local `.deps`.
+- If `FIBER_LASER_WEB_PYTHON` is not set, the plugin auto-detects a usable interpreter (including KiCad/system Python) and uses it only if it can import the bundled dependencies.
 
 AppImage note (Linux):
 
@@ -153,11 +155,16 @@ Example (Linux):
 export FIBER_LASER_WEB_PYTHON=/path/to/kicad/python
 ```
 
-When using KiCad Python, install dependencies into the plugin-local `.deps` folder and the app will load them automatically:
+When using a development checkout instead of the packaged release zip, install dependencies into the plugin-local `.deps` folder and the app will load them automatically:
 
 ```bash
-python3 -m pip install --only-binary=:all: --prefer-binary --target ~/.local/share/kicad/10.0/scripting/plugins/fiberlasercam/.deps ezdxf==1.4.4 shapely==2.0.7 Flask==3.0.3
+python3 -m pip install --ignore-installed --only-binary=:all: --prefer-binary --target ~/.local/share/kicad/10.0/scripting/plugins/fiberlasercam/.deps ezdxf==1.4.4 shapely==2.0.7 Flask==3.0.3
 ```
+
+Release packaging note:
+
+- The GitHub Actions release zip now bundles `.deps` inside the plugin package.
+- The current workflow builds that bundle on Ubuntu, so the packaged dependencies are aimed at Linux x86_64 environments.
 
 Launcher behavior:
 
