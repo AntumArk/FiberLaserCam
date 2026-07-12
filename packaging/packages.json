@@ -22,6 +22,12 @@
       },
       "versions": [
         {
+          "version": "0.1.14",
+          "status": "stable",
+          "kicad_version": "9.0",
+          "runtime": "swig"
+        },
+        {
           "version": "0.1.13",
           "status": "stable",
           "kicad_version": "9.0",
