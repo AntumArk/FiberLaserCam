@@ -60,7 +60,7 @@ def polygon_centroid(points: Ring) -> Point:
 
 def ensure_polygon(points: list[Point]) -> Ring | None:
     ring = [(float(x), float(y)) for x, y in points]
-    if len(ring) >= 2 anlook at https://github.com/gregdavill/KiBuzzard . it implement live preview of a graphics. lets try moving from web to similar style preview. d ring[0] == ring[-1]:
+    if len(ring) >= 2 and ring[0] == ring[-1]:
         ring = ring[:-1]
     if len(ring) < 3:
         return None
