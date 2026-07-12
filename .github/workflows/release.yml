@@ -55,6 +55,8 @@ jobs:
 
           VERSION="${{ steps.vars.outputs.version }}"
           VERSION_NO_V="${{ steps.vars.outputs.version_no_v }}"
+          ZIP_NAME="FiberLaserCam-${VERSION}-kicad-plugin.zip"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${VERSION}/${ZIP_NAME}"
 
           rm -rf package release
           mkdir -p package/plugins package/resources release
@@ -75,6 +77,7 @@ jobs:
               metadata = json.load(f)
 
           metadata["versions"][0]["version"] = "${VERSION_NO_V}"
+            metadata["versions"][0]["download_url"] = "${DOWNLOAD_URL}"
 
           with open(path, "w", encoding="utf-8") as f:
               json.dump(metadata, f, indent=2)
@@ -83,7 +86,9 @@ jobs:
 
           python3 -m json.tool package/metadata.json > /dev/null
 
-          ZIP_NAME="FiberLaserCam-${VERSION}-kicad-plugin.zip"
+          cp package/metadata.json release/metadata.json
+          python3 -m json.tool release/metadata.json > /dev/null
+
           (
             cd package
             zip -r "../release/${ZIP_NAME}" .
@@ -199,6 +204,7 @@ jobs:
           path: |
             release/${{ steps.build.outputs.zip_name }}
             release/${{ steps.build.outputs.zip_name }}.sha256
+            release/metadata.json
             release/packages.json
             release/repository.json
             release/${{ steps.appimage.outputs.appimage_name }}
@@ -212,6 +218,7 @@ jobs:
           files: |
             release/${{ steps.build.outputs.zip_name }}
             release/${{ steps.build.outputs.zip_name }}.sha256
+            release/metadata.json
             release/packages.json
             release/repository.json
             release/${{ steps.appimage.outputs.appimage_name }}
