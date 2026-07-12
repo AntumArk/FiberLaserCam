@@ -1,0 +1,120 @@
+name: Release KiCad Plugin
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (example: v0.1.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release version
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="${{ inputs.tag }}"
+          fi
+
+          if [[ -z "${VERSION}" ]]; then
+            echo "Release version is empty. Use a tag push or provide workflow_dispatch input 'tag'." >&2
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version_no_v=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build KiCad package zip
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.vars.outputs.version }}"
+          VERSION_NO_V="${{ steps.vars.outputs.version_no_v }}"
+
+          rm -rf package release
+          mkdir -p package/plugins release
+
+          cp -a ./*.py package/plugins/
+          cp -a LICENSE README.md requirements.txt icon_fiber_laser.xpm package/plugins/
+          cp -a static templates img package/plugins/
+
+          cat > package/metadata.json <<EOF
+          {
+            "\$schema": "https://go.kicad.org/pcm/schemas/v2",
+            "name": "FiberLaserCam",
+            "description": "DXF hatch and contour-offset workflow plugin for KiCad PCB fabrication prep.",
+            "description_full": "FiberLaserCam exports KiCad PCB geometry to DXF and generates hatch lines or contour offsets for downstream fiber laser workflows. It supports direct export and web preview tuning.",
+            "identifier": "com.github.antumark.fiberlasercam",
+            "type": "plugin",
+            "author": {
+              "name": "AntumArk",
+              "contact": {
+                "web": "https://github.com/AntumArk/FiberLaserCam"
+              }
+            },
+            "license": "Apache-2.0",
+            "resources": {
+              "homepage": "https://github.com/AntumArk/FiberLaserCam",
+              "repository": "https://github.com/AntumArk/FiberLaserCam",
+              "issues": "https://github.com/AntumArk/FiberLaserCam/issues"
+            },
+            "versions": [
+              {
+                "version": "${VERSION_NO_V}",
+                "status": "stable",
+                "kicad_version": "9.0",
+                "runtime": "swig"
+              }
+            ]
+          }
+          EOF
+
+          python3 -m json.tool package/metadata.json > /dev/null
+
+          ZIP_NAME="FiberLaserCam-${VERSION}-kicad-plugin.zip"
+          (
+            cd package
+            zip -r "../release/${ZIP_NAME}" .
+          )
+
+          sha256sum "release/${ZIP_NAME}" > "release/${ZIP_NAME}.sha256"
+
+          echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FiberLaserCam-${{ steps.vars.outputs.version }}
+          path: |
+            release/${{ steps.build.outputs.zip_name }}
+            release/${{ steps.build.outputs.zip_name }}.sha256
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.version }}
+          name: FiberLaserCam ${{ steps.vars.outputs.version }}
+          files: |
+            release/${{ steps.build.outputs.zip_name }}
+            release/${{ steps.build.outputs.zip_name }}.sha256
+          generate_release_notes: true
