@@ -122,25 +122,7 @@ jobs:
             --download-size "${DOWNLOAD_SIZE}" \
             --install-size "${INSTALL_SIZE}"
 
-            python3 - <<'PY'
-            import json
-
-            required = ("download_sha256", "download_url", "download_size", "install_size")
-
-            with open("packaging/packages.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
-
-            for package in data.get("packages", []):
-              cleaned = []
-              for version in package.get("versions", []):
-                if all(version.get(key) not in (None, "") for key in required):
-                  cleaned.append(version)
-              package["versions"] = cleaned
-
-            with open("packaging/packages.json", "w", encoding="utf-8") as f:
-              json.dump(data, f, indent=2)
-              f.write("\n")
-            PY
+          python3 -c "import json; p='packaging/packages.json'; required=('download_sha256','download_url','download_size','install_size'); data=json.load(open(p, encoding='utf-8')); [pkg.update({'versions':[v for v in pkg.get('versions', []) if all(v.get(k) not in (None, '') for k in required)]}) for pkg in data.get('packages', [])]; json.dump(data, open(p, 'w', encoding='utf-8'), indent=2); open(p, 'a', encoding='utf-8').write('\\n')"
 
           python3 -m json.tool packaging/packages.json > /dev/null
           cp packaging/packages.json release/packages.json
