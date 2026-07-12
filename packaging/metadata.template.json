@@ -15,7 +15,8 @@
   "resources": {
     "homepage": "https://github.com/AntumArk/FiberLaserCam",
     "repository": "https://github.com/AntumArk/FiberLaserCam",
-    "issues": "https://github.com/AntumArk/FiberLaserCam/issues"
+    "issues": "https://github.com/AntumArk/FiberLaserCam/issues",
+    "download": "https://github.com/AntumArk/FiberLaserCam"
   },
   "versions": [
     {
