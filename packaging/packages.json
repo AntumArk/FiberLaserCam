@@ -25,7 +25,11 @@
           "version": "0.1.20",
           "status": "stable",
           "kicad_version": "9.0",
-          "runtime": "swig"
+          "runtime": "swig",
+          "download_sha256": "7de6937a6be3f2f7ee871100704b32a05390d6c1e3c75098b9f0d53127b8a684",
+          "download_url": "https://github.com/AntumArk/FiberLaserCam/releases/download/v0.1.20/FiberLaserCam-v0.1.20-kicad-plugin.zip",
+          "download_size": 254695,
+          "install_size": 346178
         },
         {
           "version": "0.1.18",
