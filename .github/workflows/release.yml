@@ -93,6 +93,108 @@ jobs:
 
           echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
 
+      - name: Build PCM repository index (packages.json / repository.json)
+        id: pcm_index
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.vars.outputs.version }}"
+          ZIP_NAME="${{ steps.build.outputs.zip_name }}"
+          REPO="${{ github.repository }}"
+
+          # download_url is pinned to this specific tag's release asset, so it
+          # keeps working forever even after newer releases are published.
+          export DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ZIP_NAME}"
+          export DOWNLOAD_SHA256
+          DOWNLOAD_SHA256="$(cut -d' ' -f1 "release/${ZIP_NAME}.sha256")"
+          export DOWNLOAD_SIZE
+          DOWNLOAD_SIZE="$(stat -c%s "release/${ZIP_NAME}")"
+          export INSTALL_SIZE
+          INSTALL_SIZE="$(du -sb package | cut -f1)"
+
+          # Pull the previously published packages.json (served from the
+          # "latest" release alias) so version history accumulates across
+          # releases instead of being overwritten. Missing on first release.
+          curl -fsSL "https://github.com/${REPO}/releases/latest/download/packages.json" \
+            -o prev_packages.json || echo '{"packages": []}' > prev_packages.json
+
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("package/metadata.json", "r", encoding="utf-8") as f:
+              metadata = json.load(f)
+
+          version_entry = dict(metadata["versions"][0])
+          version_entry["download_sha256"] = os.environ["DOWNLOAD_SHA256"]
+          version_entry["download_url"] = os.environ["DOWNLOAD_URL"]
+          version_entry["download_size"] = int(os.environ["DOWNLOAD_SIZE"])
+          version_entry["install_size"] = int(os.environ["INSTALL_SIZE"])
+
+          with open("prev_packages.json", "r", encoding="utf-8") as f:
+              repo_index = json.load(f)
+
+          packages = repo_index.get("packages", [])
+          identifier = metadata["identifier"]
+
+          existing = next((p for p in packages if p.get("identifier") == identifier), None)
+          if existing is None:
+              existing = {k: v for k, v in metadata.items() if k != "versions"}
+              existing["versions"] = []
+              packages.append(existing)
+          else:
+              for key, value in metadata.items():
+                  if key != "versions":
+                      existing[key] = value
+
+          existing["versions"] = [
+              v for v in existing["versions"] if v.get("version") != version_entry["version"]
+          ]
+          existing["versions"].insert(0, version_entry)
+
+          with open("release/packages.json", "w", encoding="utf-8") as f:
+              json.dump({"packages": packages}, f, indent=2)
+              f.write("\n")
+          PY
+
+          python3 -m json.tool release/packages.json > /dev/null
+
+          export PACKAGES_SHA256
+          PACKAGES_SHA256="$(sha256sum release/packages.json | cut -d' ' -f1)"
+          export UPDATE_TIMESTAMP
+          UPDATE_TIMESTAMP="$(date -u +%s)"
+          export UPDATE_TIME_UTC
+          UPDATE_TIME_UTC="$(date -u +"%Y-%m-%d %H:%M:%S")"
+          export PACKAGES_URL="https://github.com/${REPO}/releases/latest/download/packages.json"
+
+          python3 - <<'PY'
+          import json
+          import os
+
+          repository = {
+              "$schema": "https://go.kicad.org/pcm/schemas/v2#/definitions/Repository",
+              "name": "FiberLaserCam repository",
+              "maintainer": {
+                  "name": "AntumArk",
+                  "contact": {"web": "https://github.com/AntumArk/FiberLaserCam"},
+              },
+              "packages": {
+                  "url": os.environ["PACKAGES_URL"],
+                  "sha256": os.environ["PACKAGES_SHA256"],
+                  "update_timestamp": int(os.environ["UPDATE_TIMESTAMP"]),
+                  "update_time_utc": os.environ["UPDATE_TIME_UTC"],
+              },
+              "schema_version": 2,
+          }
+
+          with open("release/repository.json", "w", encoding="utf-8") as f:
+              json.dump(repository, f, indent=2)
+              f.write("\n")
+          PY
+
+          python3 -m json.tool release/repository.json > /dev/null
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -100,6 +202,8 @@ jobs:
           path: |
             release/${{ steps.build.outputs.zip_name }}
             release/${{ steps.build.outputs.zip_name }}.sha256
+            release/packages.json
+            release/repository.json
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -109,4 +213,6 @@ jobs:
           files: |
             release/${{ steps.build.outputs.zip_name }}
             release/${{ steps.build.outputs.zip_name }}.sha256
+            release/packages.json
+            release/repository.json
           generate_release_notes: true

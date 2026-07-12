@@ -119,6 +119,20 @@ If the button does not appear:
 - Check KiCad's plugin console for Python import errors.
 - Re-run plugin refresh after any file changes.
 
+### Install Via KiCad Plugin And Content Manager (PCM Repository)
+
+Every GitHub release publishes a self-hosted PCM repository alongside the plugin zip, so KiCad can find, install, and update FiberLaserCam directly from its Plugin and Content Manager instead of a manual copy.
+
+1. Open KiCad's PCM: `Tools -> Plugin and Content Manager`.
+2. `Manage`  ->  `Add` and paste this repository URL:
+   ```text
+   https://github.com/AntumArk/FiberLaserCam/releases/latest/download/repository.json
+   ```
+3. FiberLaserCam now shows up under `Plugins`; click `Install`.
+4. Future releases show up as updates in the same PCM dialog.
+
+This URL always resolves to the latest release's `repository.json`. Each release regenerates `packages.json`/`repository.json` with the correct `download_sha256`, `download_size`, and `install_size` for that release's zip, while keeping prior versions' download links (pinned to their own release tag) working for users on older KiCad releases.
+
 ### PCM Package Notes
 
 - KiCad toolbar button icon and PCM package icon are different assets.
@@ -153,16 +167,11 @@ Example (Linux):
 export FIBER_LASER_WEB_PYTHON=/path/to/kicad/python
 ```
 
-When using a development checkout instead of the packaged release zip, install dependencies into the plugin-local ABI-specific folder and the app will load them automatically:
+The optional standalone Flask web app is not bundled by the release workflow; install it separately if you use `app.py`:
 
 ```bash
-python3 -m pip install --ignore-installed --only-binary=:all: --prefer-binary --target ~/.local/share/kicad/10.0/scripting/plugins/fiberlasercam/.deps/cp313 ezdxf==1.4.4 Flask==3.0.3
+python3 -m pip install Flask==3.0.3
 ```
-
-Release packaging note:
-
-- The GitHub Actions release zip now bundles `.deps/cp311` and `.deps/cp313` inside the plugin package.
-- The current workflow builds those bundles on Ubuntu, so the packaged dependencies are aimed at Linux x86_64 environments.
 
 Launcher behavior:
 

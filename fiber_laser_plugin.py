@@ -808,7 +808,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             final_path = Path(save_dlg.GetPath())
 
         final_path.write_bytes(body)
-        _message("Fiber Laser Export", f"Export complete:\n{final_path}", wx.OK | wx.ICON_INFORMATION)
+        self.status_lbl.SetLabel(f"Export complete: {final_path}")
 
     def _on_close_window(self, _event) -> None:
         self._persist_current_settings()
