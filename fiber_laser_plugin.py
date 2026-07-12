@@ -151,6 +151,30 @@ def _message(title: str, text: str, style: int) -> None:
     wx.MessageBox(text, title, style)
 
 
+def _find_kicad_parent_window() -> wx.Window | None:
+    try:
+        top_levels = list(wx.GetTopLevelWindows())
+    except Exception:
+        return None
+
+    for window in top_levels:
+        try:
+            title = window.GetTitle().lower()
+        except Exception:
+            continue
+        if "pcb editor" in title or "pcbnew" in title:
+            return window
+
+    for window in top_levels:
+        try:
+            if window.IsShown():
+                return window
+        except Exception:
+            continue
+
+    return None
+
+
 def _find_kicad_cli() -> str | None:
     for candidate in ("kicad-cli", "kicad-cli.exe"):
         resolved = shutil.which(candidate)
@@ -614,11 +638,12 @@ def _disconnect_web_session(base_url: str, token: str) -> None:
 
 def _direct_export_via_web(raw_output_path: Path, selected_layer: str, settings: dict[str, object]) -> Path:
     token = uuid.uuid4().hex
+    parent_window = _find_kicad_parent_window()
     progress = wx.ProgressDialog(
         "Fiber Laser Web Launcher",
         "Starting local export server...",
         maximum=100,
-        parent=None,
+        parent=parent_window,
         style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE | wx.PD_ELAPSED_TIME,
     )
     base_url = ""
@@ -651,7 +676,7 @@ def _direct_export_via_web(raw_output_path: Path, selected_layer: str, settings:
             f"{raw_output_path.stem}-{selected_layer.replace('.', '_')}-{settings['mode']}.dxf"
         )
         with wx.FileDialog(
-            None,
+            parent_window,
             "Save direct export DXF",
             defaultDir=str(output_default.parent),
             defaultFile=output_default.name,
@@ -714,7 +739,8 @@ class FiberLaserExportPlugin(pcbnew.ActionPlugin):
 
         all_settings = _load_all_layer_settings()
         initial_settings = all_settings.get(default_layer, _default_layer_settings_for(default_layer))
-        with LauncherSettingsDialog(None, layer_choices, default_layer, initial_settings) as settings_dlg:
+        parent_window = _find_kicad_parent_window()
+        with LauncherSettingsDialog(parent_window, layer_choices, default_layer, initial_settings) as settings_dlg:
             if settings_dlg.ShowModal() != wx.ID_OK:
                 return
             collected = settings_dlg.collect_result()
@@ -754,7 +780,7 @@ class FiberLaserExportPlugin(pcbnew.ActionPlugin):
             "Fiber Laser Web Launcher",
             "Starting local browser server...",
             maximum=100,
-            parent=None,
+            parent=parent_window,
             style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE | wx.PD_ELAPSED_TIME,
         )
         try:
