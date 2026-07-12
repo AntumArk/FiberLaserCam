@@ -1,31 +1,34 @@
 from __future__ import annotations
 
-import os
+import io
 import json
-import importlib
 import re
-import socket
 import subprocess
 import shutil
 import sys
-import tempfile
 import time
-import urllib.request
-import urllib.error
 import uuid
-import webbrowser
 from pathlib import Path
-from urllib.parse import quote_plus
 
 import pcbnew
 import wx
+
+import ezdxf
+from app_geometry import (
+    DEFAULT_MIN_HATCH_AREA,
+    build_contour_loops_for_selection,
+    build_zone_payload_from_dxf_path,
+    generate_contour_offsets_for_selection,
+    generate_hatch_for_selection,
+    resolve_spacing,
+)
+from app_sessions import UploadSession
 
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 TEMP_DXF_DIR = PLUGIN_DIR / "temp_dxf"
 SETTINGS_KEY = "layer_settings_json"
 LAST_LAYER_KEY = "last_layer"
-_ACTIVE_EMBEDDED_SERVER = None
 
 
 DEFAULT_LAYER_SETTINGS: dict[str, object] = {
@@ -235,195 +238,6 @@ def _run_kicad_dxf_export(kicad_cli: str, board_path: Path, output_path: Path, l
         raise RuntimeError(details)
 
 
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _find_web_app_script() -> Path | None:
-    env_path = os.environ.get("FIBER_LASER_WEB_APP", "").strip()
-    candidates = [
-        Path(env_path) if env_path else None,
-        PLUGIN_DIR / "app.py",
-    ]
-    for candidate in candidates:
-        if candidate and candidate.exists():
-            return candidate
-    return None
-
-
-def _python_can_import_web_deps(python_exe: str) -> bool:
-    if not python_exe:
-        return False
-
-    clean_env = dict(os.environ)
-    clean_env.pop("PYTHONHOME", None)
-    clean_env.pop("PYTHONPATH", None)
-
-    deps_dir = str(PLUGIN_DIR / ".deps")
-    code = f"import sys; sys.path.insert(0, {deps_dir!r}); import ezdxf, shapely, flask"
-    check = subprocess.run(
-        [python_exe, "-c", code],
-        capture_output=True,
-        text=True,
-        env=clean_env,
-    )
-    return check.returncode == 0
-
-
-def _runtime_python_candidates() -> list[str]:
-    candidates: list[str] = []
-    seen: set[str] = set()
-
-    def add_candidate(candidate: str | None) -> None:
-        if not candidate:
-            return
-        resolved = str(Path(candidate).expanduser())
-        if resolved in seen:
-            return
-        if not Path(resolved).exists():
-            return
-        seen.add(resolved)
-        candidates.append(resolved)
-
-    add_candidate(sys.executable)
-    add_candidate(shutil.which("kicad-python"))
-    add_candidate(shutil.which("python3"))
-    add_candidate(shutil.which("python"))
-
-    if sys.platform.startswith("linux"):
-        appdir = os.environ.get("APPDIR", "").strip()
-        if appdir:
-            add_candidate(str(Path(appdir) / "usr/bin/python3"))
-            add_candidate(str(Path(appdir) / "usr/bin/python"))
-        add_candidate("/usr/bin/kicad-python")
-        add_candidate("/usr/lib/kicad/python/bin/python3")
-        add_candidate("/usr/lib64/kicad/python/bin/python3")
-
-    return candidates
-
-
-def _detect_web_runtime_python() -> str | None:
-    for candidate in _runtime_python_candidates():
-        if _python_can_import_web_deps(candidate):
-            return candidate
-
-    return None
-
-
-def _ensure_web_runtime_python() -> str:
-    detected = _detect_web_runtime_python()
-    if detected:
-        return detected
-
-    tried = "\n".join(f"- {candidate}" for candidate in _runtime_python_candidates())
-    raise RuntimeError(
-        "Failed to prepare a web runtime. No usable Python interpreter could import Flask, ezdxf, and shapely from the plugin bundle.\n\n"
-        "Tried interpreters:\n"
-        f"{tried}\n\n"
-        "This plugin expects bundled dependencies in the plugin-local .deps folder. Reinstall from a release package that includes .deps, "
-        "or set FIBER_LASER_WEB_PYTHON to a compatible interpreter that can import the bundled dependencies."
-    )
-
-
-def _tail_log_file(log_path: Path, lines: int = 40) -> str:
-    try:
-        content = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except Exception:
-        return ""
-    if not content:
-        return ""
-    return "\n".join(content[-lines:])
-
-
-def _wait_for_web_server(base_url: str, token: str, timeout_sec: float = 30.0, progress_dialog=None) -> bool:
-    deadline = time.time() + timeout_sec
-    ping_url = f"{base_url}api/ping?token={quote_plus(token)}"
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(ping_url, timeout=1.0) as resp:  # nosec B310
-                if resp.status == 200:
-                    return True
-        except Exception:
-            if progress_dialog is not None:
-                try:
-                    progress_dialog.Pulse(f"Starting local browser server... {base_url}")
-                    wx.YieldIfNeeded()
-                except Exception:
-                    pass
-            time.sleep(0.25)
-    return False
-
-
-def _start_web_server_for_session(token: str, progress_dialog=None) -> str:
-    port = _find_free_port()
-    base_url = f"http://127.0.0.1:{port}/"
-
-    global _ACTIVE_EMBEDDED_SERVER
-    if _ACTIVE_EMBEDDED_SERVER is not None:
-        try:
-            _ACTIVE_EMBEDDED_SERVER.shutdown()
-        except Exception:
-            pass
-        _ACTIVE_EMBEDDED_SERVER = None
-
-    try:
-        app_module = importlib.import_module("app")
-    except Exception as exc:
-        raise RuntimeError(f"Failed to import embedded web app from KiCad Python: {exc}") from exc
-
-    if not hasattr(app_module, "start_embedded_server"):
-        raise RuntimeError("Embedded web app helper is missing from app.py.")
-
-    _ACTIVE_EMBEDDED_SERVER = app_module.start_embedded_server("127.0.0.1", port, token)
-
-    if not _wait_for_web_server(base_url, token, progress_dialog=progress_dialog):
-        details = f"Web server did not start at {base_url}"
-        try:
-            if _ACTIVE_EMBEDDED_SERVER is not None:
-                _ACTIVE_EMBEDDED_SERVER.shutdown()
-        except Exception:
-            pass
-        _ACTIVE_EMBEDDED_SERVER = None
-        raise RuntimeError(details)
-
-    return base_url
-
-
-def _http_post_json(url: str, payload: dict[str, object], timeout: float = 30.0):
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
-            raw = resp.read()
-            body = raw.decode("utf-8", errors="replace") if raw else ""
-            return resp.status, body
-    except urllib.error.HTTPError as exc:
-        raw = exc.read() if hasattr(exc, "read") else b""
-        body = raw.decode("utf-8", errors="replace") if raw else str(exc)
-        return int(exc.code), body
-
-
-def _http_post_raw(url: str, payload: dict[str, object], timeout: float = 30.0):
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
-            return resp.status, resp.read()
-    except urllib.error.HTTPError as exc:
-        raw = exc.read() if hasattr(exc, "read") else b""
-        return int(exc.code), raw
-
-
 class LauncherSettingsDialog(wx.Dialog):
     def __init__(self, parent, layer_choices: list[str], initial_layer: str, initial_settings: dict[str, object]):
         super().__init__(parent, title="Fiber Laser Export Settings")
@@ -597,7 +411,7 @@ class LauncherSettingsDialog(wx.Dialog):
         layer = self._current_layer()
         settings, err = self._read_controls_to_settings()
         if err:
-            _message("Fiber Laser Web Launcher", err, wx.OK | wx.ICON_ERROR)
+            _message("Fiber Laser Launcher", err, wx.OK | wx.ICON_ERROR)
             return None
 
         self._all_layer_settings[layer] = settings
@@ -606,97 +420,449 @@ class LauncherSettingsDialog(wx.Dialog):
         return layer, settings
 
 
-def _start_web_session_and_upload(raw_output_path: Path, token: str, progress_dialog=None):
-    base_url = _start_web_server_for_session(token, progress_dialog=progress_dialog)
-    status, body = _http_post_json(f"{base_url}api/upload-path", {"path": str(raw_output_path)})
-    if status != 200:
-        raise RuntimeError(f"Failed to create upload session: HTTP {status}\n{body}")
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Invalid upload response: {exc}") from exc
+class PreviewCanvas(wx.Panel):
+    def __init__(self, parent):
+        super().__init__(parent, style=wx.BORDER_SIMPLE)
+        self.zones: dict[str, list[list[float]]] = {}
+        self.selected: set[str] = set()
+        self.segments: list[list[list[float]]] = []
+        self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+        self.Bind(wx.EVT_PAINT, self._on_paint)
 
-    upload_id = str(payload.get("uploadId", "")).strip()
-    zones = payload.get("zones") if isinstance(payload.get("zones"), list) else []
-    if not upload_id:
-        raise RuntimeError("Upload session response is missing uploadId.")
-    return base_url, upload_id, zones
+    def set_data(self, zones: dict[str, list[list[float]]], selected: set[str], segments: list[list[list[float]]]) -> None:
+        self.zones = zones
+        self.selected = selected
+        self.segments = segments
+        self.Refresh(False)
+
+    def _collect_bounds(self) -> tuple[float, float, float, float] | None:
+        xs: list[float] = []
+        ys: list[float] = []
+        for pts in self.zones.values():
+            for p in pts:
+                xs.append(float(p[0]))
+                ys.append(float(p[1]))
+        for seg in self.segments:
+            for p in seg:
+                xs.append(float(p[0]))
+                ys.append(float(p[1]))
+        if not xs or not ys:
+            return None
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def _on_paint(self, _event) -> None:
+        dc = wx.AutoBufferedPaintDC(self)
+        dc.Clear()
+
+        bounds = self._collect_bounds()
+        if bounds is None:
+            return
+
+        minx, miny, maxx, maxy = bounds
+        width, height = self.GetClientSize()
+        if width <= 2 or height <= 2:
+            return
+
+        span_x = max(maxx - minx, 1e-6)
+        span_y = max(maxy - miny, 1e-6)
+        margin = 16.0
+        scale = min((width - 2 * margin) / span_x, (height - 2 * margin) / span_y)
+
+        def sx(x: float) -> int:
+            return int(margin + ((x - minx) * scale))
+
+        def sy(y: float) -> int:
+            return int(height - (margin + ((y - miny) * scale)))
+
+        zone_pen = wx.Pen(wx.Colour(90, 90, 90), 1)
+        selected_pen = wx.Pen(wx.Colour(0, 140, 220), 2)
+        hatch_pen = wx.Pen(wx.Colour(220, 70, 60), 1)
+
+        for zid, pts in self.zones.items():
+            if len(pts) < 2:
+                continue
+            poly_pts = [wx.Point(sx(float(p[0])), sy(float(p[1]))) for p in pts]
+            poly_pts.append(poly_pts[0])
+            dc.SetPen(selected_pen if zid in self.selected else zone_pen)
+            dc.DrawLines(poly_pts)
+
+        dc.SetPen(hatch_pen)
+        for seg in self.segments:
+            if len(seg) != 2:
+                continue
+            p1, p2 = seg
+            dc.DrawLine(sx(float(p1[0])), sy(float(p1[1])), sx(float(p2[0])), sy(float(p2[1])))
 
 
-def _disconnect_web_session(base_url: str, token: str) -> None:
-    global _ACTIVE_EMBEDDED_SERVER
-    try:
-        _http_post_json(f"{base_url}api/disconnect", {"token": token}, timeout=5.0)
-    except Exception:
-        pass
-    if _ACTIVE_EMBEDDED_SERVER is not None:
-        try:
-            _ACTIVE_EMBEDDED_SERVER.shutdown()
-        except Exception:
-            pass
-        _ACTIVE_EMBEDDED_SERVER = None
+class NativePreviewDialog(wx.Dialog):
+    def __init__(
+        self,
+        parent,
+        session: UploadSession,
+        zones: list[dict],
+        selected_layer: str,
+        settings: dict[str, object],
+        raw_output_path: Path,
+    ):
+        super().__init__(parent, title="Fiber Laser Live Preview")
+        self.session = session
+        self.selected_layer = selected_layer
+        self.settings = settings
+        self.raw_output_path = raw_output_path
 
+        self.zone_map: dict[str, list[list[float]]] = {}
+        self.zone_order: list[str] = []
+        for z in zones:
+            zid = str(z.get("id", "")).strip()
+            pts = z.get("points") if isinstance(z.get("points"), list) else []
+            if not zid or not pts:
+                continue
+            self.zone_order.append(zid)
+            self.zone_map[zid] = pts
 
-def _direct_export_via_web(raw_output_path: Path, selected_layer: str, settings: dict[str, object]) -> Path:
-    token = uuid.uuid4().hex
-    parent_window = _find_kicad_parent_window()
-    progress = wx.ProgressDialog(
-        "Fiber Laser Web Launcher",
-        "Starting local export server...",
-        maximum=100,
-        parent=parent_window,
-        style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE | wx.PD_ELAPSED_TIME,
-    )
-    base_url = ""
-    try:
-        base_url, upload_id, zones = _start_web_session_and_upload(raw_output_path, token, progress_dialog=progress)
-        selected_ids = [str(z.get("id")) for z in zones if isinstance(z, dict) and z.get("id") is not None]
-        if not selected_ids:
-            raise RuntimeError("No closed zones were detected for direct export.")
+        panel = wx.Panel(self)
+        root = wx.BoxSizer(wx.HORIZONTAL)
 
-        payload = {
-            "uploadId": upload_id,
-            "selectedIds": selected_ids,
-            "mode": settings["mode"],
-            "angle": settings["angle"],
-            "spacing": settings["spacing"],
-            "useManualSpacing": settings["useManualSpacing"],
-            "laserRadius": settings["laserRadius"],
-            "minArea": settings["minArea"],
-            "outerZoneOnly": settings["outerZoneOnly"],
-            "offsetStart": settings["offsetStart"],
-            "offsetSpacing": settings["offsetSpacing"],
-            "offsetCount": settings["offsetCount"],
-            "invertOffsetDirection": settings["invertOffsetDirection"],
+        left = wx.BoxSizer(wx.VERTICAL)
+        left.Add(wx.StaticText(panel, label="Zones"), 0, wx.ALL, 6)
+
+        labels: list[str] = []
+        for z in zones:
+            zid = str(z.get("id", "")).strip()
+            if not zid:
+                continue
+            area = float(z.get("area", 0.0)) if z.get("area") is not None else 0.0
+            labels.append(f"#{zid}  area={area:.3f}")
+
+        self.zone_list = wx.CheckListBox(panel, choices=labels)
+        left.Add(self.zone_list, 1, wx.ALL | wx.EXPAND, 6)
+
+        self.hatch_all_ctrl = wx.CheckBox(panel, label="Select all zones")
+        self.hatch_all_ctrl.SetValue(bool(settings.get("hatchAll", True)))
+        left.Add(self.hatch_all_ctrl, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+
+        self.outer_only_ctrl = wx.CheckBox(panel, label="Outer zone only")
+        self.outer_only_ctrl.SetValue(bool(settings.get("outerZoneOnly", False)))
+        self.outer_only_ctrl.Enable(str(settings.get("mode", "hatch")) == "hatch")
+        left.Add(self.outer_only_ctrl, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+
+        self.refresh_btn = wx.Button(panel, label="Refresh Preview")
+        left.Add(self.refresh_btn, 0, wx.ALL | wx.EXPAND, 6)
+
+        self.export_btn = wx.Button(panel, label="Export DXF")
+        left.Add(self.export_btn, 0, wx.ALL | wx.EXPAND, 6)
+
+        self.status_lbl = wx.StaticText(panel, label="")
+        left.Add(self.status_lbl, 0, wx.ALL | wx.EXPAND, 6)
+
+        self.canvas = PreviewCanvas(panel)
+
+        root.Add(left, 0, wx.EXPAND)
+        root.Add(self.canvas, 1, wx.ALL | wx.EXPAND, 6)
+
+        panel.SetSizer(root)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(panel, 1, wx.EXPAND)
+        outer.Add(self.CreateSeparatedButtonSizer(wx.CLOSE), 0, wx.ALL | wx.EXPAND, 6)
+        self.SetSizerAndFit(outer)
+        self.SetMinSize((980, 640))
+
+        self.zone_list.Bind(wx.EVT_CHECKLISTBOX, self._on_zone_checked)
+        self.hatch_all_ctrl.Bind(wx.EVT_CHECKBOX, self._on_hatch_all)
+        self.outer_only_ctrl.Bind(wx.EVT_CHECKBOX, self._on_refresh)
+        self.refresh_btn.Bind(wx.EVT_BUTTON, self._on_refresh)
+        self.export_btn.Bind(wx.EVT_BUTTON, self._on_export)
+
+        if self.hatch_all_ctrl.GetValue():
+            for i in range(self.zone_list.GetCount()):
+                self.zone_list.Check(i, True)
+
+        self._refresh_preview()
+
+    def _selected_ids(self) -> list[str]:
+        ids: list[str] = []
+        for i, zid in enumerate(self.zone_order):
+            if i < self.zone_list.GetCount() and self.zone_list.IsChecked(i):
+                ids.append(zid)
+        return ids
+
+    def _preview_payload(self) -> dict[str, object]:
+        return {
+            "selectedIds": self._selected_ids(),
+            "mode": self.settings["mode"],
+            "angle": self.settings["angle"],
+            "spacing": self.settings["spacing"],
+            "useManualSpacing": self.settings["useManualSpacing"],
+            "laserRadius": self.settings["laserRadius"],
+            "minArea": self.settings["minArea"],
+            "outerZoneOnly": self.outer_only_ctrl.GetValue(),
+            "offsetStart": self.settings["offsetStart"],
+            "offsetSpacing": self.settings["offsetSpacing"],
+            "offsetCount": self.settings["offsetCount"],
+            "invertOffsetDirection": self.settings["invertOffsetDirection"],
         }
-        status, body = _http_post_raw(f"{base_url}api/export", payload, timeout=120.0)
-        if status != 200:
-            raise RuntimeError(f"Direct export failed: HTTP {status}\n{body.decode('utf-8', errors='replace')}")
 
-        output_default = raw_output_path.with_name(
-            f"{raw_output_path.stem}-{selected_layer.replace('.', '_')}-{settings['mode']}.dxf"
+    def _on_zone_checked(self, _event) -> None:
+        self.hatch_all_ctrl.SetValue(False)
+        self._refresh_preview()
+
+    def _on_hatch_all(self, _event) -> None:
+        checked = self.hatch_all_ctrl.GetValue()
+        for i in range(self.zone_list.GetCount()):
+            self.zone_list.Check(i, checked)
+        self._refresh_preview()
+
+    def _on_refresh(self, _event) -> None:
+        self._refresh_preview()
+
+    def _refresh_preview(self) -> None:
+        payload = self._preview_payload()
+        try:
+            segments = _generate_preview_segments(
+                self.session,
+                payload,
+                outer_only_override=self.outer_only_ctrl.GetValue(),
+            )
+        except Exception as exc:
+            self.status_lbl.SetLabel(f"Preview failed: {exc}")
+            self.canvas.set_data(self.zone_map, set(self._selected_ids()), [])
+            return
+        self.canvas.set_data(self.zone_map, set(self._selected_ids()), segments)
+        self.status_lbl.SetLabel(f"Zones: {len(self._selected_ids())}    Segments: {len(segments)}")
+
+    def _on_export(self, _event) -> None:
+        payload = self._preview_payload()
+        try:
+            body = _generate_export_dxf_bytes(
+                self.session,
+                payload,
+                outer_only_override=self.outer_only_ctrl.GetValue(),
+            )
+        except Exception as exc:
+            _message(
+                "Fiber Laser Live Preview",
+                f"Export failed: {exc}",
+                wx.OK | wx.ICON_ERROR,
+            )
+            return
+
+        output_default = self.raw_output_path.with_name(
+            f"{self.raw_output_path.stem}-{self.selected_layer.replace('.', '_')}-{self.settings['mode']}.dxf"
         )
         with wx.FileDialog(
-            parent_window,
-            "Save direct export DXF",
+            self,
+            "Save exported DXF",
             defaultDir=str(output_default.parent),
             defaultFile=output_default.name,
             wildcard="DXF files (*.dxf)|*.dxf",
             style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
         ) as save_dlg:
             if save_dlg.ShowModal() != wx.ID_OK:
-                raise RuntimeError("Direct export cancelled.")
+                return
             final_path = Path(save_dlg.GetPath())
 
         final_path.write_bytes(body)
-        return final_path
+        _message("Fiber Laser Live Preview", f"Export complete:\n{final_path}", wx.OK | wx.ICON_INFORMATION)
+
+
+def _build_local_session_from_dxf(raw_output_path: Path) -> tuple[UploadSession, list[dict]]:
+    zones, zone_map = build_zone_payload_from_dxf_path(str(raw_output_path))
+    now = time.time()
+    session = UploadSession(
+        path=str(raw_output_path),
+        zone_map=zone_map,
+        zone_payload=zones,
+        created_ts=now,
+        last_access_ts=now,
+        temp_paths=[str(raw_output_path)],
+    )
+    return session, zones
+
+
+def _generate_preview_segments(
+    session: UploadSession,
+    payload: dict[str, object],
+    *,
+    outer_only_override: bool | None = None,
+) -> list[list[list[float]]]:
+    selected_ids = payload.get("selectedIds") or []
+    mode = str(payload.get("mode", "hatch"))
+
+    if mode == "contour_offsets":
+        start_offset = float(payload.get("offsetStart", 0.2))
+        offset_spacing = float(payload.get("offsetSpacing", 0.2))
+        offset_count = int(payload.get("offsetCount", 3))
+        invert_offset_direction = bool(payload.get("invertOffsetDirection", False))
+        segments, _ = generate_contour_offsets_for_selection(
+            session,
+            selected_ids,
+            start_offset,
+            offset_spacing,
+            offset_count,
+            invert_offset_direction=invert_offset_direction,
+        )
+        return segments
+
+    angle = float(payload.get("angle", 45))
+    laser_radius = float(payload.get("laserRadius", 0.01))
+    min_area = float(payload.get("minArea", DEFAULT_MIN_HATCH_AREA))
+    use_manual_spacing = bool(payload.get("useManualSpacing", False))
+    spacing_value = payload.get("spacing", None)
+    spacing_float = None if spacing_value in (None, "") else float(spacing_value)
+    spacing, spacing_error = resolve_spacing(use_manual_spacing, spacing_float, laser_radius)
+    if spacing_error is not None or spacing is None:
+        raise RuntimeError(spacing_error or "Invalid hatch spacing")
+
+    outer_zone_only = bool(payload.get("outerZoneOnly", False))
+    if outer_only_override is not None:
+        outer_zone_only = bool(outer_only_override)
+
+    segments, _ = generate_hatch_for_selection(
+        session,
+        selected_ids,
+        angle,
+        spacing,
+        laser_radius,
+        min_area,
+        outer_zone_only,
+    )
+    return segments
+
+
+def _generate_export_dxf_bytes(
+    session: UploadSession,
+    payload: dict[str, object],
+    *,
+    outer_only_override: bool | None = None,
+) -> bytes:
+    selected_ids = payload.get("selectedIds") or []
+    mode = str(payload.get("mode", "hatch"))
+
+    if mode == "contour_offsets":
+        start_offset = float(payload.get("offsetStart", 0.2))
+        offset_spacing = float(payload.get("offsetSpacing", 0.2))
+        offset_count = int(payload.get("offsetCount", 3))
+        invert_offset_direction = bool(payload.get("invertOffsetDirection", False))
+        segments, _ = generate_contour_offsets_for_selection(
+            session,
+            selected_ids,
+            start_offset,
+            offset_spacing,
+            offset_count,
+            invert_offset_direction=invert_offset_direction,
+        )
+        loops = build_contour_loops_for_selection(
+            session,
+            selected_ids,
+            start_offset,
+            offset_spacing,
+            offset_count,
+            invert_offset_direction=invert_offset_direction,
+        )
+    else:
+        segments = _generate_preview_segments(session, payload, outer_only_override=outer_only_override)
+        loops = []
+
+    source_doc = ezdxf.readfile(session.path)
+    source_version = "R2000" if mode == "contour_offsets" else getattr(source_doc, "dxfversion", "R2010") or "R2010"
+    doc = ezdxf.new(source_version)
+    if "$INSUNITS" in source_doc.header:
+        doc.header["$INSUNITS"] = source_doc.header["$INSUNITS"]
+
+    for header_key in ("$PDMODE", "$PDSIZE"):
+        if header_key in doc.header:
+            del doc.header[header_key]
+
+    layer_name = "HATCH_GEN"
+    if layer_name not in doc.layers:
+        doc.layers.new(layer_name, dxfattribs={"color": 1})
+
+    modelspace = doc.modelspace()
+    if mode == "contour_offsets":
+        for loop in loops:
+            if len(loop) < 3:
+                continue
+            try:
+                modelspace.add_lwpolyline(loop, close=True, dxfattribs={"layer": layer_name})
+            except Exception:
+                modelspace.add_polyline2d(loop, close=True, dxfattribs={"layer": layer_name})
+    else:
+        for seg in segments:
+            p1, p2 = seg
+            modelspace.add_line((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0), dxfattribs={"layer": layer_name})
+
+    stream = io.StringIO()
+    doc.write(stream)
+    return stream.getvalue().encode("utf-8")
+
+
+def _open_native_preview_local(raw_output_path: Path, selected_layer: str, settings: dict[str, object], parent_window) -> None:
+    progress = wx.ProgressDialog(
+        "Fiber Laser Live Preview",
+        "Preparing local preview...",
+        maximum=100,
+        parent=parent_window,
+        style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE | wx.PD_ELAPSED_TIME,
+    )
+    try:
+        session, zones = _build_local_session_from_dxf(raw_output_path)
     finally:
-        if base_url:
-            _disconnect_web_session(base_url, token)
         try:
             progress.Destroy()
         except Exception:
             pass
+
+    dlg = NativePreviewDialog(
+        parent_window,
+        session=session,
+        zones=zones,
+        selected_layer=selected_layer,
+        settings=settings,
+        raw_output_path=raw_output_path,
+    )
+    dlg.ShowModal()
+
+
+def _direct_export_local(raw_output_path: Path, selected_layer: str, settings: dict[str, object]) -> Path:
+    session, zones = _build_local_session_from_dxf(raw_output_path)
+    selected_ids = [str(z.get("id")) for z in zones if isinstance(z, dict) and z.get("id") is not None]
+    if not selected_ids:
+        raise RuntimeError("No closed zones were detected for direct export.")
+
+    payload = {
+        "selectedIds": selected_ids,
+        "mode": settings["mode"],
+        "angle": settings["angle"],
+        "spacing": settings["spacing"],
+        "useManualSpacing": settings["useManualSpacing"],
+        "laserRadius": settings["laserRadius"],
+        "minArea": settings["minArea"],
+        "outerZoneOnly": settings["outerZoneOnly"],
+        "offsetStart": settings["offsetStart"],
+        "offsetSpacing": settings["offsetSpacing"],
+        "offsetCount": settings["offsetCount"],
+        "invertOffsetDirection": settings["invertOffsetDirection"],
+    }
+    body = _generate_export_dxf_bytes(session, payload)
+
+    parent_window = _find_kicad_parent_window()
+    output_default = raw_output_path.with_name(
+        f"{raw_output_path.stem}-{selected_layer.replace('.', '_')}-{settings['mode']}.dxf"
+    )
+    with wx.FileDialog(
+        parent_window,
+        "Save direct export DXF",
+        defaultDir=str(output_default.parent),
+        defaultFile=output_default.name,
+        wildcard="DXF files (*.dxf)|*.dxf",
+        style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
+    ) as save_dlg:
+        if save_dlg.ShowModal() != wx.ID_OK:
+            raise RuntimeError("Direct export cancelled.")
+        final_path = Path(save_dlg.GetPath())
+
+    final_path.write_bytes(body)
+    return final_path
 
 
 class FiberLaserExportPlugin(pcbnew.ActionPlugin):
@@ -705,9 +871,9 @@ class FiberLaserExportPlugin(pcbnew.ActionPlugin):
         return str(PLUGIN_DIR / "icon_fiber_laser.xpm")
 
     def defaults(self) -> None:
-        self.name = "Fiber Laser Web Launcher"
+        self.name = "Fiber Laser Launcher"
         self.category = "Fabrication"
-        self.description = "Export board DXF and open browser workflow"
+        self.description = "Export board DXF with native preview and direct export"
         self.show_toolbar_button = True
         self.icon_file_name = self._icon_path()
 
@@ -720,17 +886,17 @@ class FiberLaserExportPlugin(pcbnew.ActionPlugin):
     def Run(self) -> None:
         board = pcbnew.GetBoard()
         if board is None:
-            _message("Fiber Laser Web Launcher", "Open a PCB before running the exporter.", wx.OK | wx.ICON_ERROR)
+            _message("Fiber Laser Launcher", "Open a PCB before running the exporter.", wx.OK | wx.ICON_ERROR)
             return
 
         board_path = Path(str(board.GetFileName()))
         if not board_path.name or not board_path.exists():
-            _message("Fiber Laser Web Launcher", "Save the board first so KiCad can export it.", wx.OK | wx.ICON_ERROR)
+            _message("Fiber Laser Launcher", "Save the board first so KiCad can export it.", wx.OK | wx.ICON_ERROR)
             return
 
         kicad_cli = _find_kicad_cli()
         if kicad_cli is None:
-            _message("Fiber Laser Web Launcher", "kicad-cli was not found on PATH.", wx.OK | wx.ICON_ERROR)
+            _message("Fiber Laser Launcher", "kicad-cli was not found on PATH.", wx.OK | wx.ICON_ERROR)
             return
 
         layer_choices = _extract_board_layer_names(board_path)
@@ -750,22 +916,22 @@ class FiberLaserExportPlugin(pcbnew.ActionPlugin):
             selected_layer, layer_settings = collected
 
         TEMP_DXF_DIR.mkdir(parents=True, exist_ok=True)
-        raw_output_path = TEMP_DXF_DIR / f"{board_path.stem}-fiber-web-{uuid.uuid4().hex}.dxf"
+        raw_output_path = TEMP_DXF_DIR / f"{board_path.stem}-fiber-export-{uuid.uuid4().hex}.dxf"
         try:
             _run_kicad_dxf_export(kicad_cli, board_path, raw_output_path, selected_layer)
         except RuntimeError as exc:
-            _message("Fiber Laser Web Launcher", f"DXF export failed.\n\n{exc}", wx.OK | wx.ICON_ERROR)
+            _message("Fiber Laser Launcher", f"DXF export failed.\n\n{exc}", wx.OK | wx.ICON_ERROR)
             return
 
         if str(layer_settings["action"]) == "direct_export":
             try:
-                out_path = _direct_export_via_web(raw_output_path, selected_layer, layer_settings)
+                out_path = _direct_export_local(raw_output_path, selected_layer, layer_settings)
             except RuntimeError as exc:
                 if "cancelled" not in str(exc).lower():
-                    _message("Fiber Laser Web Launcher", f"Direct export failed.\n\n{exc}", wx.OK | wx.ICON_ERROR)
+                    _message("Fiber Laser Launcher", f"Direct export failed.\n\n{exc}", wx.OK | wx.ICON_ERROR)
                 return
             _message(
-                "Fiber Laser Web Launcher",
+                "Fiber Laser Launcher",
                 (
                     "Direct export complete.\n\n"
                     f"Layer: {selected_layer}\n"
@@ -776,56 +942,8 @@ class FiberLaserExportPlugin(pcbnew.ActionPlugin):
             )
             return
 
-        token = uuid.uuid4().hex
-        launch_dialog = wx.ProgressDialog(
-            "Fiber Laser Web Launcher",
-            "Starting local browser server...",
-            maximum=100,
-            parent=parent_window,
-            style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE | wx.PD_ELAPSED_TIME,
-        )
         try:
-            base_url = _start_web_server_for_session(token, progress_dialog=launch_dialog)
+            _open_native_preview_local(raw_output_path, selected_layer, layer_settings, parent_window)
         except Exception as exc:
-            try:
-                launch_dialog.Destroy()
-            except Exception:
-                pass
-            _message("Fiber Laser Web Launcher", f"Failed to start web server.\n\n{exc}", wx.OK | wx.ICON_ERROR)
+            _message("Fiber Laser Launcher", f"Live preview failed.\n\n{exc}", wx.OK | wx.ICON_ERROR)
             return
-        finally:
-            try:
-                launch_dialog.Destroy()
-            except Exception:
-                pass
-
-        web_url = (
-            f"{base_url}?sourcePath={quote_plus(str(raw_output_path))}"
-            f"&mode={quote_plus(str(layer_settings['mode']))}"
-            f"&layers={quote_plus(selected_layer)}"
-            f"&token={quote_plus(token)}"
-            f"&layer={quote_plus(selected_layer)}"
-            f"&angle={quote_plus(str(layer_settings['angle']))}"
-            f"&spacing={quote_plus(str(layer_settings['spacing']))}"
-            f"&useManualSpacing={quote_plus('1' if bool(layer_settings['useManualSpacing']) else '0')}"
-            f"&laserRadius={quote_plus(str(layer_settings['laserRadius']))}"
-            f"&minArea={quote_plus(str(layer_settings['minArea']))}"
-            f"&outerZoneOnly={quote_plus('1' if bool(layer_settings['outerZoneOnly']) else '0')}"
-            f"&offsetStart={quote_plus(str(layer_settings['offsetStart']))}"
-            f"&offsetSpacing={quote_plus(str(layer_settings['offsetSpacing']))}"
-            f"&offsetCount={quote_plus(str(layer_settings['offsetCount']))}"
-            f"&invertOffsetDirection={quote_plus('1' if bool(layer_settings['invertOffsetDirection']) else '0')}"
-            f"&hatchAll={quote_plus('1' if bool(layer_settings['hatchAll']) else '0')}"
-        )
-        webbrowser.open(web_url)
-
-        _message(
-            "Fiber Laser Web Launcher",
-            (
-                "Opened browser workflow.\n\n"
-                f"Layer: {selected_layer}\n"
-                f"Raw DXF: {raw_output_path}\n\n"
-                "Closing the browser tab will stop this temporary server automatically."
-            ),
-            wx.OK | wx.ICON_INFORMATION,
-        )

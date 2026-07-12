@@ -7,6 +7,8 @@ import tempfile
 import threading
 from pathlib import Path
 
+from runtime_deps import extend_sys_path_for_deps
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DEPS_DIR = BASE_DIR / ".deps"
@@ -14,6 +16,8 @@ if DEPS_DIR.is_dir():
     deps_dir_str = str(DEPS_DIR)
     if deps_dir_str not in sys.path:
         sys.path.insert(0, deps_dir_str)
+
+extend_sys_path_for_deps(BASE_DIR)
 
 import ezdxf
 from flask import Flask, jsonify, render_template, request, send_file

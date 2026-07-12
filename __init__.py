@@ -1,6 +1,8 @@
 from pathlib import Path
 import sys
 
+from runtime_deps import extend_sys_path_for_deps
+
 
 def _log_plugin_error(message: str) -> None:
     log_path = Path.home() / ".local/share/kicad/10.0/scripting/plugins/fiberlasercam/plugin_load.log"
@@ -20,6 +22,8 @@ if plugin_dir_str not in sys.path:
 deps_dir_str = str(PLUGIN_DIR / ".deps")
 if deps_dir_str not in sys.path:
     sys.path.insert(0, deps_dir_str)
+
+extend_sys_path_for_deps(PLUGIN_DIR)
 
 
 try:
