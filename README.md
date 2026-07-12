@@ -121,7 +121,7 @@ If the button does not appear:
 
 ### Standalone AppImage (No KiCad Required)
 
-Each GitHub release also publishes `FiberLaserCam-<version>-x86_64.AppImage`, a standalone Linux executable that generates contour-offset loops or angled hatch fill from a source DXF without needing KiCad installed. It requires only a system `python3` (the underlying code has zero third-party dependencies).
+Each GitHub release also publishes `FiberLaserCam-<version>-x86_64.AppImage`, a standalone Linux executable that generates contour-offset loops or angled hatch fill from either a source DXF or a KiCad board/project file. It requires only a system `python3` (the underlying code has zero third-party dependencies). For KiCad input (`.kicad_pcb` / `.kicad_pro`), `kicad-cli` must also be available in `PATH`.
 
 ```bash
 chmod +x FiberLaserCam-*.AppImage
@@ -131,9 +131,12 @@ chmod +x FiberLaserCam-*.AppImage
 
 # Hatch fill
 ./FiberLaserCam-*.AppImage source.dxf output.dxf --mode hatch --angle 45 -i 2000
+
+# Directly from a KiCad project (auto-detects .kicad_pro/.kicad_pcb)
+./FiberLaserCam-*.AppImage board.kicad_pro output.dxf --mode hatch -i 2000 --kicad-layers F.Cu,Edge.Cuts
 ```
 
-Short options: `-s` start offset, `-i` spacing (both in microns), `-n` repetitions. Add `--invert` to offset outward instead of inward. Run with `--help` for the full option list. This tool wraps `offline_export.generate_contour_offset_dxf()` / `generate_hatch_dxf()`, the same functions used internally by the KiCad plugin.
+Short options: `-s` start offset, `-i` spacing (both in microns), `-n` repetitions. Add `--invert` to offset outward instead of inward. Input selection defaults to `--input-format auto` and can be forced with `--input-format dxf|kicad`. Use `--kicad-layers` to pass an explicit layer list for KiCad source exports. Run with `--help` for the full option list. This tool wraps `offline_export.generate_contour_offset_dxf()` / `generate_hatch_dxf()`, the same functions used internally by the KiCad plugin.
 
 
 ### PCM Package Notes

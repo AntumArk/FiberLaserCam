@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import re
+import shutil
+import subprocess
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import minidxf as ezdxf
@@ -14,6 +19,119 @@ except ImportError:
 
 def _collect_polygons_from_dxf(doc: ezdxf.Drawing) -> list[list[tuple[float, float]]]:
     return collect_entities_as_polygons(doc)
+
+
+def _find_kicad_cli() -> str | None:
+    for candidate in ("kicad-cli", "kicad-cli.exe"):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    return None
+
+
+def _extract_board_layer_names(board_path: Path) -> list[str]:
+    try:
+        with board_path.open("r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception:
+        return ["Edge.Cuts", "F.Cu", "B.Cu"]
+
+    in_layers = False
+    layer_names: list[str] = []
+    layer_re = re.compile(r"\(\s*\d+\s+\"([^\"]+)\"")
+
+    for line in lines:
+        stripped = line.strip()
+        if not in_layers and stripped.startswith("(layers"):
+            in_layers = True
+            continue
+
+        if in_layers and stripped == ")":
+            break
+
+        if in_layers:
+            m = layer_re.search(line)
+            if m:
+                layer_names.append(m.group(1))
+
+    return layer_names or ["Edge.Cuts", "F.Cu", "B.Cu"]
+
+
+def _resolve_board_path(source_path: Path) -> Path:
+    suffix = source_path.suffix.lower()
+    if suffix == ".kicad_pcb":
+        return source_path
+    if suffix == ".kicad_pro":
+        board_path = source_path.with_suffix(".kicad_pcb")
+        if board_path.exists():
+            return board_path
+        raise RuntimeError(
+            f"Could not find board file next to project: expected {board_path}"
+        )
+    raise RuntimeError(
+        "KiCad input must be a .kicad_pcb board or .kicad_pro project file."
+    )
+
+
+def _export_kicad_to_dxf(source_path: Path, output_dxf_path: Path, layers: str | None) -> None:
+    board_path = _resolve_board_path(source_path)
+    kicad_cli = _find_kicad_cli()
+    if not kicad_cli:
+        raise RuntimeError(
+            "kicad-cli not found in PATH. Install KiCad CLI or provide a DXF input file."
+        )
+
+    layer_set = layers or ",".join(_extract_board_layer_names(board_path))
+    command = [
+        kicad_cli,
+        "pcb",
+        "export",
+        "dxf",
+        str(board_path),
+        "-o",
+        str(output_dxf_path),
+        "--layers",
+        layer_set,
+        "--mode-single",
+        "--output-units",
+        "mm",
+        "--use-contours",
+    ]
+
+    completed = subprocess.run(command, capture_output=True, text=True)
+    if completed.returncode != 0:
+        details = completed.stderr.strip() or completed.stdout.strip() or "Unknown export failure."
+        raise RuntimeError(f"kicad-cli DXF export failed: {details}")
+
+    if not output_dxf_path.exists():
+        raise RuntimeError("kicad-cli finished but no DXF output file was produced.")
+
+
+def _detect_input_kind(source_path: Path, input_format: str) -> str:
+    if input_format in ("dxf", "kicad"):
+        return input_format
+
+    suffix = source_path.suffix.lower()
+    if suffix == ".dxf":
+        return "dxf"
+    if suffix in (".kicad_pcb", ".kicad_pro"):
+        return "kicad"
+    raise RuntimeError(
+        "Could not auto-detect input type. Use --input-format dxf|kicad."
+    )
+
+
+@contextmanager
+def _prepared_input_dxf(source_path: Path, input_format: str, kicad_layers: str | None):
+    kind = _detect_input_kind(source_path, input_format)
+    if kind == "dxf":
+        yield source_path
+        return
+
+    with tempfile.TemporaryDirectory(prefix="fiberlasercam-kicad-") as tmp_dir:
+        exported = Path(tmp_dir) / f"{source_path.stem}.dxf"
+        _export_kicad_to_dxf(source_path, exported, kicad_layers)
+        yield exported
 
 
 def generate_contour_offset_dxf(
@@ -135,10 +253,25 @@ def _build_arg_parser():
 
     parser = argparse.ArgumentParser(
         prog="fiberlasercam",
-        description="Generate contour-offset loops or hatch fill from a source DXF, independent of KiCad.",
+        description="Generate contour-offset loops or hatch fill from a DXF or KiCad board/project file.",
     )
-    parser.add_argument("source_dxf", type=Path, help="Path to the source DXF file.")
+    parser.add_argument(
+        "source",
+        type=Path,
+        help="Path to source input: .dxf, .kicad_pcb, or .kicad_pro.",
+    )
     parser.add_argument("output_dxf", type=Path, help="Path to write the generated DXF file.")
+    parser.add_argument(
+        "--input-format",
+        choices=["auto", "dxf", "kicad"],
+        default="auto",
+        help="Force input parser selection (default: auto by file extension).",
+    )
+    parser.add_argument(
+        "--kicad-layers",
+        default=None,
+        help="Comma-separated layers for kicad-cli DXF export when source is KiCad (default: all board layers).",
+    )
     parser.add_argument(
         "-s", "--start-offset", type=float, default=20.0,
         help="Offset of the first contour loop, in microns (default: 20).",
@@ -172,26 +305,27 @@ def main(argv: list[str] | None = None) -> int:
     start_offset_mm = args.start_offset / 1000.0
     spacing_mm = args.spacing / 1000.0
     try:
-        if args.mode == "hatch":
-            polys, count = generate_hatch_dxf(
-                args.source_dxf,
-                args.output_dxf,
-                args.angle,
-                spacing_mm,
-                args.layer_name,
-            )
-            print(f"source polygons: {polys}, generated hatch segments: {count} -> {args.output_dxf}")
-        else:
-            polys, count = generate_contour_offset_dxf(
-                args.source_dxf,
-                args.output_dxf,
-                start_offset_mm,
-                spacing_mm,
-                args.repetitions,
-                args.layer_name,
-                args.invert,
-            )
-            print(f"source polygons: {polys}, generated loops: {count} -> {args.output_dxf}")
+        with _prepared_input_dxf(args.source, args.input_format, args.kicad_layers) as source_dxf_path:
+            if args.mode == "hatch":
+                polys, count = generate_hatch_dxf(
+                    source_dxf_path,
+                    args.output_dxf,
+                    args.angle,
+                    spacing_mm,
+                    args.layer_name,
+                )
+                print(f"source polygons: {polys}, generated hatch segments: {count} -> {args.output_dxf}")
+            else:
+                polys, count = generate_contour_offset_dxf(
+                    source_dxf_path,
+                    args.output_dxf,
+                    start_offset_mm,
+                    spacing_mm,
+                    args.repetitions,
+                    args.layer_name,
+                    args.invert,
+                )
+                print(f"source polygons: {polys}, generated loops: {count} -> {args.output_dxf}")
     except Exception as exc:
         print(f"error: {exc}")
         return 1
