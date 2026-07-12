@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import importlib
 import re
 import socket
 import subprocess
@@ -24,6 +25,7 @@ PLUGIN_DIR = Path(__file__).resolve().parent
 TEMP_DXF_DIR = PLUGIN_DIR / "temp_dxf"
 SETTINGS_KEY = "layer_settings_json"
 LAST_LAYER_KEY = "last_layer"
+_ACTIVE_EMBEDDED_SERVER = None
 
 
 DEFAULT_LAYER_SETTINGS: dict[str, object] = {
@@ -355,43 +357,35 @@ def _wait_for_web_server(base_url: str, token: str, timeout_sec: float = 30.0, p
 
 
 def _start_web_server_for_session(token: str, progress_dialog=None) -> str:
-    app_script = _find_web_app_script()
-    if app_script is None:
-        raise RuntimeError("Web app script not found. Put app.py in the bundle root.")
-
-    configured_python = os.environ.get("FIBER_LASER_WEB_PYTHON", "").strip()
-    if configured_python:
-        python_exe = configured_python
-    else:
-        python_exe = _detect_web_runtime_python() or _ensure_web_runtime_python()
     port = _find_free_port()
     base_url = f"http://127.0.0.1:{port}/"
 
-    env = dict(os.environ)
-    env.pop("PYTHONHOME", None)
-    env.pop("PYTHONPATH", None)
-    env["FIBER_LASER_EPHEMERAL"] = "1"
-    env["FIBER_LASER_SERVER_TOKEN"] = token
-    env["FIBER_LASER_WEB_HOST"] = "127.0.0.1"
-    env["FIBER_LASER_WEB_PORT"] = str(port)
-    env["FIBER_LASER_WEB_DEBUG"] = "0"
+    global _ACTIVE_EMBEDDED_SERVER
+    if _ACTIVE_EMBEDDED_SERVER is not None:
+        try:
+            _ACTIVE_EMBEDDED_SERVER.shutdown()
+        except Exception:
+            pass
+        _ACTIVE_EMBEDDED_SERVER = None
 
-    log_path = Path(tempfile.gettempdir()) / f"fiberlaser_web_{token}.log"
-    log_file = log_path.open("w", encoding="utf-8")
-    subprocess.Popen(
-        [python_exe, str(app_script)],
-        cwd=str(app_script.parent),
-        env=env,
-        stdout=log_file,
-        stderr=log_file,
-        start_new_session=True,
-    )
+    try:
+        app_module = importlib.import_module("app")
+    except Exception as exc:
+        raise RuntimeError(f"Failed to import embedded web app from KiCad Python: {exc}") from exc
+
+    if not hasattr(app_module, "start_embedded_server"):
+        raise RuntimeError("Embedded web app helper is missing from app.py.")
+
+    _ACTIVE_EMBEDDED_SERVER = app_module.start_embedded_server("127.0.0.1", port, token)
 
     if not _wait_for_web_server(base_url, token, progress_dialog=progress_dialog):
-        log_tail = _tail_log_file(log_path)
         details = f"Web server did not start at {base_url}"
-        if log_tail:
-            details += f"\n\nServer log tail:\n{log_tail}"
+        try:
+            if _ACTIVE_EMBEDDED_SERVER is not None:
+                _ACTIVE_EMBEDDED_SERVER.shutdown()
+        except Exception:
+            pass
+        _ACTIVE_EMBEDDED_SERVER = None
         raise RuntimeError(details)
 
     return base_url
@@ -630,10 +624,17 @@ def _start_web_session_and_upload(raw_output_path: Path, token: str, progress_di
 
 
 def _disconnect_web_session(base_url: str, token: str) -> None:
+    global _ACTIVE_EMBEDDED_SERVER
     try:
         _http_post_json(f"{base_url}api/disconnect", {"token": token}, timeout=5.0)
     except Exception:
         pass
+    if _ACTIVE_EMBEDDED_SERVER is not None:
+        try:
+            _ACTIVE_EMBEDDED_SERVER.shutdown()
+        except Exception:
+            pass
+        _ACTIVE_EMBEDDED_SERVER = None
 
 
 def _direct_export_via_web(raw_output_path: Path, selected_layer: str, settings: dict[str, object]) -> Path:

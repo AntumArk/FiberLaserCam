@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,6 +24,7 @@ _LAST_HEARTBEAT_TS = _START_TS
 _HAS_HEARTBEAT = False
 _DISCONNECT_REQUESTED = False
 _SHUTDOWN_LOCK = threading.Lock()
+_SHUTDOWN_CALLBACK: Callable[[], None] | None = None
 SESSION_LOCK = threading.Lock()
 _WORKER_LOCK = threading.Lock()
 _WORKERS_STARTED = False
@@ -52,6 +54,53 @@ def touch_heartbeat() -> None:
     with _SHUTDOWN_LOCK:
         _LAST_HEARTBEAT_TS = time.time()
         _HAS_HEARTBEAT = True
+
+
+def configure_runtime(
+    *,
+    ephemeral_mode: bool | None = None,
+    server_token: str | None = None,
+    shutdown_callback: Callable[[], None] | None = None,
+) -> None:
+    global EPHEMERAL_MODE, SERVER_TOKEN, _START_TS, _LAST_HEARTBEAT_TS, _HAS_HEARTBEAT, _DISCONNECT_REQUESTED, _SHUTDOWN_CALLBACK
+    now = time.time()
+    with _SHUTDOWN_LOCK:
+        if ephemeral_mode is not None:
+            EPHEMERAL_MODE = bool(ephemeral_mode)
+        if server_token is not None:
+            SERVER_TOKEN = str(server_token).strip()
+        _START_TS = now
+        _LAST_HEARTBEAT_TS = now
+        _HAS_HEARTBEAT = False
+        _DISCONNECT_REQUESTED = False
+        _SHUTDOWN_CALLBACK = shutdown_callback
+
+
+def _trigger_shutdown() -> None:
+    callback: Callable[[], None] | None
+    with _SHUTDOWN_LOCK:
+        callback = _SHUTDOWN_CALLBACK
+
+    if callback is not None:
+        try:
+            callback()
+        except Exception:
+            pass
+        return
+
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _disarm_runtime_after_shutdown() -> None:
+    global EPHEMERAL_MODE, _START_TS, _LAST_HEARTBEAT_TS, _HAS_HEARTBEAT, _DISCONNECT_REQUESTED, _SHUTDOWN_CALLBACK
+    now = time.time()
+    with _SHUTDOWN_LOCK:
+        EPHEMERAL_MODE = False
+        _START_TS = now
+        _LAST_HEARTBEAT_TS = now
+        _HAS_HEARTBEAT = False
+        _DISCONNECT_REQUESTED = False
+        _SHUTDOWN_CALLBACK = None
 
 
 def request_disconnect() -> None:
@@ -138,29 +187,33 @@ def cleanup_stale_temp_files(base_dir: Path) -> None:
 
 
 def auto_shutdown_watchdog() -> None:
-    if not EPHEMERAL_MODE:
-        return
-
     while True:
         time.sleep(1.0)
         with _SHUTDOWN_LOCK:
             now = time.time()
             since_start = now - _START_TS
             since_heartbeat = now - _LAST_HEARTBEAT_TS
+            ephemeral_mode = EPHEMERAL_MODE
             has_heartbeat = _HAS_HEARTBEAT
             disconnect_requested = _DISCONNECT_REQUESTED
 
+        if not ephemeral_mode:
+            continue
+
         if disconnect_requested:
-            os.kill(os.getpid(), signal.SIGTERM)
-            return
+            _trigger_shutdown()
+            _disarm_runtime_after_shutdown()
+            continue
 
         if not has_heartbeat and since_start > STARTUP_IDLE_TIMEOUT_SEC:
-            os.kill(os.getpid(), signal.SIGTERM)
-            return
+            _trigger_shutdown()
+            _disarm_runtime_after_shutdown()
+            continue
 
         if has_heartbeat and since_heartbeat > HEARTBEAT_IDLE_TIMEOUT_SEC:
-            os.kill(os.getpid(), signal.SIGTERM)
-            return
+            _trigger_shutdown()
+            _disarm_runtime_after_shutdown()
+            continue
 
 
 def maintenance_janitor(base_dir: Path) -> None:

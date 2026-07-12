@@ -4,6 +4,7 @@ import io
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 
@@ -16,6 +17,7 @@ if DEPS_DIR.is_dir():
 
 import ezdxf
 from flask import Flask, jsonify, render_template, request, send_file
+from werkzeug.serving import make_server
 from werkzeug.exceptions import HTTPException
 
 from app_geometry import (
@@ -33,6 +35,7 @@ from app_sessions import (
     SESSION_LOCK,
     cleanup_all_sessions,
     cleanup_session,
+    configure_runtime,
     create_session_record,
     request_disconnect,
     start_background_workers,
@@ -43,6 +46,36 @@ from app_sessions import (
 
 app = Flask(__name__)
 start_background_workers(base_dir=os.path.dirname(__file__))
+
+
+class EmbeddedServerHandle:
+    def __init__(self, server, thread: threading.Thread):
+        self._server = server
+        self._thread = thread
+
+    def shutdown(self) -> None:
+        try:
+            self._server.shutdown()
+        except Exception:
+            pass
+        self._thread.join(timeout=2.0)
+
+
+def start_embedded_server(host: str, port: int, token: str) -> EmbeddedServerHandle:
+    server = make_server(host, port, app, threaded=True)
+
+    def shutdown_callback() -> None:
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+
+    configure_runtime(ephemeral_mode=True, server_token=token, shutdown_callback=shutdown_callback)
+    start_background_workers(base_dir=BASE_DIR)
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return EmbeddedServerHandle(server, thread)
 
 
 @app.errorhandler(Exception)
