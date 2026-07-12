@@ -75,3 +75,44 @@ def preview_contour_offset_counts(
         loops.extend(generate_contour_offset_loops(poly, start_offset, spacing, repetitions))
 
     return len(polys), len(loops)
+
+
+def _build_arg_parser():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="fiberlasercam-offline-export",
+        description="Generate contour-offset loops from a source DXF, independent of KiCad.",
+    )
+    parser.add_argument("source_dxf", type=Path, help="Path to the source DXF file.")
+    parser.add_argument("output_dxf", type=Path, help="Path to write the generated DXF file.")
+    parser.add_argument("--start-offset", type=float, default=1.0, help="Offset of the first contour loop (default: 1.0).")
+    parser.add_argument("--spacing", type=float, default=1.0, help="Spacing between successive contour loops (default: 1.0).")
+    parser.add_argument("--repetitions", type=int, default=1, help="Number of contour loops to generate (default: 1).")
+    parser.add_argument("--layer-name", default="HATCH_GEN", help="Layer name for generated loops (default: HATCH_GEN).")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_arg_parser().parse_args(argv)
+    try:
+        polys, loops = generate_contour_offset_dxf(
+            args.source_dxf,
+            args.output_dxf,
+            args.start_offset,
+            args.spacing,
+            args.repetitions,
+            args.layer_name,
+        )
+    except Exception as exc:
+        print(f"error: {exc}")
+        return 1
+
+    print(f"source polygons: {polys}, generated loops: {loops} -> {args.output_dxf}")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

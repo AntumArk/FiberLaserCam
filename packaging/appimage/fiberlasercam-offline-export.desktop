@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=FiberLaserCam Offline Export
+Comment=Generate contour-offset DXF loops without KiCad
+Exec=fiberlasercam-offline-export %F
+Icon=fiberlasercam-offline-export
+Categories=Utility;Engineering;
+Terminal=true

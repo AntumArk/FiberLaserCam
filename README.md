@@ -119,6 +119,17 @@ If the button does not appear:
 - Check KiCad's plugin console for Python import errors.
 - Re-run plugin refresh after any file changes.
 
+### Offline Export AppImage (No KiCad Required)
+
+Each GitHub release also publishes `FiberLaserCam-OfflineExport-<version>-x86_64.AppImage`, a standalone Linux executable that generates contour-offset DXF loops from a source DXF without needing KiCad installed. It requires only a system `python3` (the underlying code has zero third-party dependencies).
+
+```bash
+chmod +x FiberLaserCam-OfflineExport-*.AppImage
+./FiberLaserCam-OfflineExport-*.AppImage source.dxf output.dxf --start-offset 1.0 --spacing 1.0 --repetitions 3 --layer-name HATCH_GEN
+```
+
+Run with `--help` for the full option list. This tool wraps `offline_export.generate_contour_offset_dxf()`, the same function used internally by the KiCad plugin.
+
 
 ### PCM Package Notes
 

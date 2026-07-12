@@ -195,6 +195,37 @@ jobs:
 
           python3 -m json.tool release/repository.json > /dev/null
 
+      - name: Build offline-export AppImage
+        id: appimage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.vars.outputs.version }}"
+          APPDIR="appimage/AppDir"
+
+          rm -rf appimage
+          mkdir -p "${APPDIR}/usr/bin" "${APPDIR}/usr/share/icons/hicolor/256x256/apps"
+
+          cp offline_export.py minidxf.py app_geometry.py app_sessions.py contour_offsets.py "${APPDIR}/usr/bin/"
+
+          cp packaging/appimage/AppRun "${APPDIR}/AppRun"
+          chmod +x "${APPDIR}/AppRun"
+          cp packaging/appimage/fiberlasercam-offline-export.desktop "${APPDIR}/fiberlasercam-offline-export.desktop"
+          cp packaging/icon.png "${APPDIR}/fiberlasercam-offline-export.png"
+          cp packaging/icon.png "${APPDIR}/usr/share/icons/hicolor/256x256/apps/fiberlasercam-offline-export.png"
+
+          curl -fsSL -o appimagetool \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+
+          APPIMAGE_NAME="FiberLaserCam-OfflineExport-${VERSION}-x86_64.AppImage"
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool "${APPDIR}" "release/${APPIMAGE_NAME}"
+
+          sha256sum "release/${APPIMAGE_NAME}" > "release/${APPIMAGE_NAME}.sha256"
+
+          echo "appimage_name=${APPIMAGE_NAME}" >> "$GITHUB_OUTPUT"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -204,6 +235,8 @@ jobs:
             release/${{ steps.build.outputs.zip_name }}.sha256
             release/packages.json
             release/repository.json
+            release/${{ steps.appimage.outputs.appimage_name }}
+            release/${{ steps.appimage.outputs.appimage_name }}.sha256
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -215,4 +248,6 @@ jobs:
             release/${{ steps.build.outputs.zip_name }}.sha256
             release/packages.json
             release/repository.json
+            release/${{ steps.appimage.outputs.appimage_name }}
+            release/${{ steps.appimage.outputs.appimage_name }}.sha256
           generate_release_notes: true
