@@ -14,11 +14,24 @@ def _to_ring(geom) -> list[tuple[float, float]]:
     else:
         return []
 
-    if len(points) >= 2 and points[0] == points[-1]:
-        points = points[:-1]
     if len(points) < 3:
         return []
-    return points
+
+    deduped: list[tuple[float, float]] = [points[0]]
+    for pt in points[1:]:
+        lx, ly = deduped[-1]
+        if math.hypot(pt[0] - lx, pt[1] - ly) > 1e-9:
+            deduped.append(pt)
+
+    if len(deduped) >= 2:
+        fx, fy = deduped[0]
+        lx, ly = deduped[-1]
+        if math.hypot(fx - lx, fy - ly) <= 1e-9:
+            deduped = deduped[:-1]
+
+    if len(deduped) < 3:
+        return []
+    return deduped
 
 
 def _signed_area(points: list[tuple[float, float]]) -> float:

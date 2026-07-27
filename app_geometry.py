@@ -60,8 +60,24 @@ def polygon_centroid(points: Ring) -> Point:
 
 def ensure_polygon(points: list[Point]) -> Ring | None:
     ring = [(float(x), float(y)) for x, y in points]
-    if len(ring) >= 2 and ring[0] == ring[-1]:
-        ring = ring[:-1]
+    if len(ring) < 3:
+        return None
+
+    # Remove tiny duplicate steps that can appear in exported DXF entities
+    # (for example arc sampling that includes both 0 and 360 degrees).
+    deduped: Ring = [ring[0]]
+    for pt in ring[1:]:
+        last = deduped[-1]
+        if math.hypot(pt[0] - last[0], pt[1] - last[1]) > 1e-9:
+            deduped.append(pt)
+    ring = deduped
+
+    if len(ring) >= 2:
+        first = ring[0]
+        last = ring[-1]
+        if math.hypot(first[0] - last[0], first[1] - last[1]) <= 1e-9:
+            ring = ring[:-1]
+
     if len(ring) < 3:
         return None
     if polygon_area(ring) <= 1e-9:
