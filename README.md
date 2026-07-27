@@ -104,11 +104,16 @@ chmod +x FiberLaserCam-*.AppImage
 # Hatch fill
 ./FiberLaserCam-*.AppImage source.dxf output.dxf --mode hatch --angle 45 -i 2000
 
+# Hatch alternating nested contours (good for text islands)
+./FiberLaserCam-*.AppImage source.dxf output.dxf --mode hatch --angle 45 -i 2000 --alternate-nesting
+
 # Directly from a KiCad project (auto-detects .kicad_pro/.kicad_pcb)
 ./FiberLaserCam-*.AppImage board.kicad_pro output.dxf --mode hatch -i 2000 --kicad-layers F.Cu,Edge.Cuts
 ```
 
 Short options: `-s` start offset, `-i` spacing (both in microns), `-n` repetitions. Add `--invert` to offset outward instead of inward. Input selection defaults to `--input-format auto` and can be forced with `--input-format dxf|kicad`. Use `--kicad-layers` to pass an explicit layer list for KiCad source exports. Run with `--help` for the full option list. This tool wraps `offline_export.generate_contour_offset_dxf()` / `generate_hatch_dxf()`, the same functions used internally by the KiCad plugin.
+
+For text-style geometry, enable `--alternate-nesting` to hatch by contour nesting depth: depth 0 hatched, depth 1 skipped, depth 2 hatched, and so on.
 
 
 ### PCM Package Notes
@@ -192,6 +197,10 @@ These settings exist in the KiCad plugin dialog. The cutting impact notes descri
 - `Outer zone only (largest polygon)`
   - What it does: hatches only the largest contour and ignores inner contours for contour choice.
   - Cutting impact: useful for board-wide cleaning passes; reduces accidental focus on holes/islands.
+
+- `Alternate nested contours (text mode)`
+  - What it does: hatches contour nesting levels in alternating parity (outer filled, first inner skipped, next inner filled).
+  - Cutting impact: preserves enclosed islands in text-like geometry and avoids over-filling counters.
 
 #### Contour Offset Mode Settings
 

@@ -205,6 +205,7 @@ def generate_hatch_dxf(
     layer_name: str = "F.Cu",
     laser_radius: float = 0.01,
     min_area: float = DEFAULT_MIN_HATCH_AREA,
+    alternate_nesting_hatch: bool = False,
 ) -> tuple[int, int]:
     zones, zone_map = build_zone_payload_from_dxf_path(str(source_dxf_path))
     session = UploadSession(
@@ -217,7 +218,14 @@ def generate_hatch_dxf(
     )
     selected_ids = [zone["id"] for zone in zones]
     segments, _ = generate_hatch_for_selection(
-        session, selected_ids, angle, spacing, laser_radius, min_area, False
+        session,
+        selected_ids,
+        angle,
+        spacing,
+        laser_radius,
+        min_area,
+        False,
+        alternate_nesting_hatch,
     )
 
     if not segments:
@@ -292,6 +300,11 @@ def _build_arg_parser():
         "--angle", type=float, default=45.0,
         help="Hatch line angle in degrees, hatch mode only (default: 45).",
     )
+    parser.add_argument(
+        "--alternate-nesting",
+        action="store_true",
+        help="Hatch alternating nested contours (outer hatched, inner skipped, next nested hatched), useful for text islands.",
+    )
     parser.add_argument("--layer-name", default="F.Cu", help="Layer name for generated geometry (default: F.Cu).")
     parser.add_argument(
         "--invert", action="store_true",
@@ -313,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.angle,
                     spacing_mm,
                     args.layer_name,
+                    alternate_nesting_hatch=args.alternate_nesting,
                 )
                 print(f"source polygons: {polys}, generated hatch segments: {count} -> {args.output_dxf}")
             else:

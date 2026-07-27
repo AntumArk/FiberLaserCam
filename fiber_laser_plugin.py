@@ -44,6 +44,7 @@ DEFAULT_LAYER_SETTINGS: dict[str, object] = {
     "invertOffsetDirection": False,
     "hatchAll": True,
     "outerZoneOnly": False,
+    "alternateNestingHatch": False,
 }
 
 
@@ -104,6 +105,7 @@ def _sanitize_layer_settings(raw: dict[str, object] | None) -> dict[str, object]
         "invertOffsetDirection": _coerce_bool(merged.get("invertOffsetDirection"), bool(DEFAULT_LAYER_SETTINGS["invertOffsetDirection"])),
         "hatchAll": _coerce_bool(merged.get("hatchAll"), bool(DEFAULT_LAYER_SETTINGS["hatchAll"])),
         "outerZoneOnly": _coerce_bool(merged.get("outerZoneOnly"), bool(DEFAULT_LAYER_SETTINGS["outerZoneOnly"])),
+        "alternateNestingHatch": _coerce_bool(merged.get("alternateNestingHatch"), bool(DEFAULT_LAYER_SETTINGS["alternateNestingHatch"])),
     }
     return clean
 
@@ -355,8 +357,11 @@ def _generate_preview_segments(
         raise RuntimeError(spacing_error or "Invalid hatch spacing")
 
     outer_zone_only = bool(payload.get("outerZoneOnly", False))
+    alternate_nesting_hatch = bool(payload.get("alternateNestingHatch", False))
     if outer_only_override is not None:
         outer_zone_only = bool(outer_only_override)
+    if outer_zone_only:
+        alternate_nesting_hatch = False
 
     segments, _ = generate_hatch_for_selection(
         session,
@@ -366,6 +371,7 @@ def _generate_preview_segments(
         laser_radius,
         min_area,
         outer_zone_only,
+        alternate_nesting_hatch,
     )
     return segments
 
@@ -475,6 +481,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.offset_count_ctrl = wx.TextCtrl(panel)
         self.invert_offset_direction_ctrl = wx.CheckBox(panel, label="Invert offset direction (toward interior)")
         self.outer_zone_only_ctrl = wx.CheckBox(panel, label="Outer zone only (largest polygon)")
+        self.alternate_nesting_hatch_ctrl = wx.CheckBox(panel, label="Alternate nested contours (text mode)")
 
         def add_row(label: str, control: wx.Window):
             grid.Add(wx.StaticText(panel, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -492,6 +499,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         add_row("Contour count", self.offset_count_ctrl)
         add_row("Contour direction", self.invert_offset_direction_ctrl)
         add_row("Edge-cuts cleaning", self.outer_zone_only_ctrl)
+        add_row("Nested text hatching", self.alternate_nesting_hatch_ctrl)
 
         left.Add(grid, 0, wx.ALL | wx.EXPAND, 10)
 
@@ -526,6 +534,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.manual_spacing_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
         self.invert_offset_direction_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
         self.outer_zone_only_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
+        self.alternate_nesting_hatch_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
         self.hatch_all_ctrl.Bind(wx.EVT_CHECKBOX, self._on_hatch_all)
         self.zone_list.Bind(wx.EVT_CHECKLISTBOX, self._on_zone_checked)
         for ctrl in (
@@ -570,6 +579,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             self.invert_offset_direction_ctrl.SetValue(bool(s["invertOffsetDirection"]))
             self.hatch_all_ctrl.SetValue(bool(s["hatchAll"]))
             self.outer_zone_only_ctrl.SetValue(bool(s["outerZoneOnly"]))
+            self.alternate_nesting_hatch_ctrl.SetValue(bool(s["alternateNestingHatch"]))
         finally:
             self._suspend_events = False
 
@@ -609,6 +619,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             "invertOffsetDirection": self.invert_offset_direction_ctrl.GetValue(),
             "hatchAll": self.hatch_all_ctrl.GetValue(),
             "outerZoneOnly": self.outer_zone_only_ctrl.GetValue(),
+            "alternateNestingHatch": self.alternate_nesting_hatch_ctrl.GetValue(),
         }
         return _sanitize_layer_settings(settings), None
 
@@ -628,6 +639,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.offset_count_ctrl.Enable(is_contour)
         self.invert_offset_direction_ctrl.Enable(is_contour)
         self.outer_zone_only_ctrl.Enable(not is_contour)
+        self.alternate_nesting_hatch_ctrl.Enable((not is_contour) and (not self.outer_zone_only_ctrl.GetValue()))
 
     def _selected_ids(self) -> list[str]:
         ids: list[str] = []
@@ -751,6 +763,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             "laserRadius": settings["laserRadius"],
             "minArea": settings["minArea"],
             "outerZoneOnly": settings["outerZoneOnly"],
+            "alternateNestingHatch": settings["alternateNestingHatch"],
             "offsetStart": settings["offsetStart"],
             "offsetSpacing": settings["offsetSpacing"],
             "offsetCount": settings["offsetCount"],

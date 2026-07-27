@@ -505,6 +505,90 @@ def outer_only_hatch_geometry(zone_polys: dict[str, Ring], laser_radius: float):
     return _shrink_region(region, laser_radius)
 
 
+def _selected_zone_ids(zone_polys: dict[str, Ring], selected_ids: list) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for zid in selected_ids:
+        key = str(zid)
+        if key in seen or key not in zone_polys:
+            continue
+        seen.add(key)
+        selected.append(key)
+    selected.sort(key=lambda zid: polygon_area(zone_polys[zid]), reverse=True)
+    return selected
+
+
+def _build_selected_nesting(zone_polys: dict[str, Ring], selected_ids: list[str]) -> tuple[dict[str, str | None], dict[str, int]]:
+    parents: dict[str, str | None] = {zid: None for zid in selected_ids}
+    sorted_by_area = sorted(selected_ids, key=lambda zid: polygon_area(zone_polys[zid]))
+
+    for zid in sorted_by_area:
+        poly = zone_polys[zid]
+        parent_id: str | None = None
+        parent_area = float("inf")
+        for candidate_id in selected_ids:
+            if candidate_id == zid:
+                continue
+            candidate = zone_polys[candidate_id]
+            candidate_area = polygon_area(candidate)
+            if candidate_area <= polygon_area(poly):
+                continue
+            if candidate_area >= parent_area:
+                continue
+            if _ring_contains_ring(candidate, poly):
+                parent_id = candidate_id
+                parent_area = candidate_area
+        parents[zid] = parent_id
+
+    depths: dict[str, int] = {}
+
+    def resolve_depth(zid: str) -> int:
+        if zid in depths:
+            return depths[zid]
+        parent_id = parents[zid]
+        if parent_id is None:
+            depths[zid] = 0
+            return 0
+        depth = resolve_depth(parent_id) + 1
+        depths[zid] = depth
+        return depth
+
+    for zid in selected_ids:
+        resolve_depth(zid)
+
+    return parents, depths
+
+
+def alternating_hatch_geometries(selected_ids: list[str], zone_polys: dict[str, Ring], laser_radius: float) -> list[tuple[str, dict[str, object], int]]:
+    valid_ids = [zid for zid in selected_ids if zid in zone_polys]
+    if not valid_ids:
+        return []
+
+    parents, depths = _build_selected_nesting(zone_polys, valid_ids)
+    children: dict[str, list[str]] = {zid: [] for zid in valid_ids}
+    for zid, parent in parents.items():
+        if parent is not None and parent in children:
+            children[parent].append(zid)
+
+    geoms: list[tuple[str, dict[str, object], int]] = []
+    for zid in valid_ids:
+        depth = depths.get(zid, 0)
+        if depth % 2 != 0:
+            continue
+
+        hole_ids = [cid for cid in children.get(zid, []) if depths.get(cid, -1) == depth + 1]
+        region = {
+            "outer": zone_polys[zid],
+            "holes": [zone_polys[cid] for cid in hole_ids],
+        }
+        shrunk = _shrink_region(region, laser_radius)
+        if shrunk is not None:
+            geoms.append((zid, shrunk, depth))
+
+    geoms.sort(key=lambda item: (item[2], -polygon_area(zone_polys[item[0]])))
+    return geoms
+
+
 def hatch_segments_for_angle(geom, angle_deg: float, spacing: float) -> list[list[list[float]]]:
     if geom is None or spacing <= 0:
         return []
@@ -630,11 +714,10 @@ def generate_hatch_for_selection(
     laser_radius: float,
     min_area: float,
     outer_zone_only: bool,
+    alternate_nesting_hatch: bool = False,
 ) -> tuple[list[list[list[float]]], dict[str, int]]:
     zone_polys = build_zone_polygons(session.zone_map)
-    normalized_ids = [str(zid) for zid in selected_ids]
-
-    normalized_ids.sort(key=lambda zid: polygon_area(zone_polys[zid]) if zid in zone_polys else 0.0, reverse=True)
+    normalized_ids = _selected_zone_ids(zone_polys, selected_ids)
 
     if outer_zone_only:
         geom = outer_only_hatch_geometry(zone_polys, laser_radius)
@@ -662,6 +745,46 @@ def generate_hatch_for_selection(
         return segments, stats
 
     segments: list[list[list[float]]] = []
+
+    if alternate_nesting_hatch:
+        filtered_small = 0
+        filtered_narrow = 0
+        used_zones = 0
+        min_width = math.sqrt(max(min_area, 0.0))
+
+        for _zone_id, geom, _depth in alternating_hatch_geometries(normalized_ids, zone_polys, laser_radius):
+            if geom_area(geom) < min_area:
+                filtered_small += 1
+                continue
+            if not passes_min_width(geom, min_width):
+                filtered_narrow += 1
+                continue
+
+            zone_segments = hatch_segments(geom, angle, spacing)
+            if zone_segments:
+                segments.extend(zone_segments)
+                used_zones += 1
+
+        min_seg_len = max(spacing * 0.75, laser_radius * 2.0, 0.02)
+        segments, dropped_tiny, dropped_dupe = sanitize_segments(
+            segments,
+            min_length=min_seg_len,
+            quant_grid=SEGMENT_QUANT_GRID,
+        )
+
+        stats = {
+            "selected": len(normalized_ids),
+            "used": used_zones,
+            "filteredSmall": filtered_small,
+            "filteredCentroid": 0,
+            "filteredNarrow": filtered_narrow,
+            "droppedTiny": dropped_tiny,
+            "droppedDuplicate": dropped_dupe,
+            "outerOnlyApplied": 0,
+            "alternatingNestingApplied": 1,
+        }
+        return segments, stats
+
     seen_centroids: set[tuple[float, float]] = set()
     filtered_small = 0
     filtered_centroid = 0
@@ -721,6 +844,7 @@ def generate_hatch_for_selection(
         "droppedTiny": dropped_tiny,
         "droppedDuplicate": dropped_dupe,
         "outerOnlyApplied": 0,
+        "alternatingNestingApplied": 0,
     }
     return segments, stats
 
