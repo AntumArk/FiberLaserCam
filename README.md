@@ -109,11 +109,16 @@ chmod +x FiberLaserCam-*.AppImage
 
 # Directly from a KiCad project (auto-detects .kicad_pro/.kicad_pcb)
 ./FiberLaserCam-*.AppImage board.kicad_pro output.dxf --mode hatch -i 2000 --kicad-layers F.Cu,Edge.Cuts
+
+# Drill spirals from KiCad drill data (3 inward spirals per hole, 120 deg apart)
+./FiberLaserCam-*.AppImage board.kicad_pro drill_spirals.dxf --mode drill --layer-name DRILL_GEN
 ```
 
 Short options: `-s` start offset, `-i` spacing (both in microns), `-n` repetitions. Add `--invert` to offset outward instead of inward. Input selection defaults to `--input-format auto` and can be forced with `--input-format dxf|kicad`. Use `--kicad-layers` to pass an explicit layer list for KiCad source exports. Run with `--help` for the full option list. This tool wraps `offline_export.generate_contour_offset_dxf()` / `generate_hatch_dxf()`, the same functions used internally by the KiCad plugin.
 
 For text-style geometry, enable `--alternate-nesting` to hatch by contour nesting depth: depth 0 hatched, depth 1 skipped, depth 2 hatched, and so on.
+
+Use `--mode drill` to generate a separate drill DXF from KiCad board/project input. Each drill hole gets an outer contour at drill diameter plus 3 inward spirals offset by 120 degrees. Tune spiral density with `--spiral-turns` and `--spiral-inner-ratio`.
 
 
 ### PCM Package Notes
@@ -166,6 +171,7 @@ These settings exist in the KiCad plugin dialog. The cutting impact notes descri
 - `Hatching mode`
   - `hatch`: generates line hatch fills.
   - `contour_offsets`: generates inward contour loops.
+  - `drill_spirals`: generates drill-hole contours with three inward spiral arms per hole from KiCad drill data.
   - Cutting impact: hatch usually deposits more heat over area; contour offsets may reduce fill density but can still overheat if spacing is tight.
 
 #### Hatch Mode Settings
@@ -220,6 +226,16 @@ These settings exist in the KiCad plugin dialog. The cutting impact notes descri
   - What it does: flips contour offset direction from expansion to contraction.
   - Cutting impact: useful for processing hole-like features where offsets should move inward from boundary.
   - Drill-hole use: enable this when you want offset passes to tighten toward hole centers instead of growing outward.
+
+#### Drill Spiral Mode Settings
+
+- `Drill spiral turns`
+  - What it does: controls how many turns each inward spiral arm performs from hole edge toward center.
+  - Cutting impact: more turns increase path density and dwell time inside each hole.
+
+- `Drill spiral inner ratio`
+  - What it does: sets where each spiral ends as a fraction of hole radius.
+  - Cutting impact: lower ratios drive energy closer to hole center; higher ratios leave a larger unprocessed core.
 
 ### Practical Process Guidance
 

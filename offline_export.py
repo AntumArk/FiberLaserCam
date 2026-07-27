@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import shutil
 import subprocess
@@ -71,6 +72,226 @@ def _resolve_board_path(source_path: Path) -> Path:
     raise RuntimeError(
         "KiCad input must be a .kicad_pcb board or .kicad_pro project file."
     )
+
+
+_NUMBER_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+_AT_RE = re.compile(
+    r"\(\s*at\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)(?:\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?))?"
+)
+
+
+def _extract_balanced_blocks(text: str, keyword: str) -> list[str]:
+    pattern = f"({keyword}"
+    blocks: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        start = text.find(pattern, i)
+        if start < 0:
+            break
+
+        after = start + len(pattern)
+        if after < n and (text[after].isalnum() or text[after] in "_-."):
+            i = after
+            continue
+
+        depth = 0
+        end = -1
+        for j in range(start, n):
+            ch = text[j]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+
+        if end < 0:
+            break
+
+        blocks.append(text[start : end + 1])
+        i = end + 1
+
+    return blocks
+
+
+def _parse_at(block: str) -> tuple[float, float, float] | None:
+    m = _AT_RE.search(block)
+    if not m:
+        return None
+    x = float(m.group(1))
+    y = float(m.group(2))
+    rot = float(m.group(3)) if m.group(3) is not None else 0.0
+    return x, y, rot
+
+
+def _parse_drill_diameter(block: str) -> float | None:
+    drill_blocks = _extract_balanced_blocks(block, "drill")
+    if not drill_blocks:
+        return None
+
+    drill = drill_blocks[0]
+    values = [float(v) for v in _NUMBER_RE.findall(drill)]
+    if not values:
+        return None
+
+    if "oval" in drill:
+        if len(values) >= 2:
+            return max(values[0], values[1])
+        return values[0]
+    return values[0]
+
+
+def _rotate_point(x: float, y: float, angle_deg: float) -> tuple[float, float]:
+    t = math.radians(angle_deg)
+    ct = math.cos(t)
+    st = math.sin(t)
+    return (x * ct - y * st, x * st + y * ct)
+
+
+def _collect_kicad_drill_holes(board_path: Path) -> list[tuple[float, float, float]]:
+    text = board_path.read_text(encoding="utf-8", errors="replace")
+    holes: list[tuple[float, float, float]] = []
+
+    for via_block in _extract_balanced_blocks(text, "via"):
+        at = _parse_at(via_block)
+        diameter = _parse_drill_diameter(via_block)
+        if at is None or diameter is None or diameter <= 0:
+            continue
+        holes.append((at[0], at[1], diameter))
+
+    for footprint_block in _extract_balanced_blocks(text, "footprint"):
+        fp_at = _parse_at(footprint_block)
+        if fp_at is None:
+            continue
+        fpx, fpy, fp_rot = fp_at
+
+        for pad_block in _extract_balanced_blocks(footprint_block, "pad"):
+            if not re.search(r"\(\s*pad\b[^()]*\b(thru_hole|np_thru_hole)\b", pad_block):
+                continue
+
+            pad_at = _parse_at(pad_block)
+            diameter = _parse_drill_diameter(pad_block)
+            if pad_at is None or diameter is None or diameter <= 0:
+                continue
+
+            local_x, local_y, _ = pad_at
+            rx, ry = _rotate_point(local_x, local_y, fp_rot)
+            holes.append((fpx + rx, fpy + ry, diameter))
+
+    unique: dict[tuple[float, float, float], tuple[float, float, float]] = {}
+    for x, y, d in holes:
+        key = (round(x, 4), round(y, 4), round(d, 4))
+        unique[key] = (x, y, d)
+
+    return list(unique.values())
+
+
+def _sample_circle_points(center_x: float, center_y: float, radius: float, segments: int = 72) -> list[tuple[float, float]]:
+    pts: list[tuple[float, float]] = []
+    for i in range(segments):
+        t = (2.0 * math.pi * i) / segments
+        pts.append((center_x + radius * math.cos(t), center_y + radius * math.sin(t)))
+    return pts
+
+
+def _sample_inward_spiral(
+    center_x: float,
+    center_y: float,
+    outer_radius: float,
+    phase_deg: float,
+    turns: float,
+    inner_ratio: float,
+    points_per_turn: int,
+) -> list[tuple[float, float]]:
+    if turns <= 0:
+        return []
+
+    steps = max(24, int(turns * points_per_turn))
+    phase = math.radians(phase_deg)
+    inner_ratio = min(max(inner_ratio, 0.0), 0.95)
+    pts: list[tuple[float, float]] = []
+
+    for i in range(steps + 1):
+        s = i / steps
+        theta = phase + (2.0 * math.pi * turns * s)
+        radius = outer_radius * (1.0 - ((1.0 - inner_ratio) * s))
+        pts.append((center_x + radius * math.cos(theta), center_y + radius * math.sin(theta)))
+
+    return pts
+
+
+def build_kicad_drill_spiral_geometry(
+    source_path: Path,
+    spiral_turns: float = 1.75,
+    spiral_inner_ratio: float = 0.10,
+) -> tuple[list[list[tuple[float, float]]], list[list[list[float]]]]:
+    board_path = _resolve_board_path(source_path)
+    holes = _collect_kicad_drill_holes(board_path)
+    if not holes:
+        raise RuntimeError("No drill holes were detected in the KiCad board.")
+
+    circles: list[list[tuple[float, float]]] = []
+    segments: list[list[list[float]]] = []
+
+    for cx, cy, diameter in holes:
+        radius = diameter * 0.5
+        if radius <= 0:
+            continue
+
+        circles.append(_sample_circle_points(cx, cy, radius, segments=72))
+
+        for phase_deg in (0.0, 120.0, 240.0):
+            spiral_pts = _sample_inward_spiral(
+                cx,
+                cy,
+                radius,
+                phase_deg,
+                turns=spiral_turns,
+                inner_ratio=spiral_inner_ratio,
+                points_per_turn=84,
+            )
+            for i in range(len(spiral_pts) - 1):
+                p1 = spiral_pts[i]
+                p2 = spiral_pts[i + 1]
+                segments.append([[float(p1[0]), float(p1[1])], [float(p2[0]), float(p2[1])]])
+
+    return circles, segments
+
+
+def generate_kicad_drill_spiral_dxf(
+    source_path: Path,
+    output_dxf_path: Path,
+    layer_name: str = "DRILL_GEN",
+    spiral_turns: float = 1.75,
+    spiral_inner_ratio: float = 0.10,
+) -> tuple[int, int]:
+    circles, segments = build_kicad_drill_spiral_geometry(
+        source_path,
+        spiral_turns=spiral_turns,
+        spiral_inner_ratio=spiral_inner_ratio,
+    )
+    if not circles:
+        raise RuntimeError("No drill holes were detected in the KiCad board.")
+
+    doc = ezdxf.new("R2000")
+    doc.header["$INSUNITS"] = 4
+
+    if layer_name not in doc.layers:
+        doc.layers.new(layer_name, dxfattribs={"color": 1})
+
+    msp = doc.modelspace()
+    for circle_pts in circles:
+        msp.add_lwpolyline(circle_pts, close=True, dxfattribs={"layer": layer_name})
+
+    for seg in segments:
+        p1, p2 = seg
+        msp.add_line((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0), dxfattribs={"layer": layer_name})
+
+    output_dxf_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.saveas(str(output_dxf_path))
+    return len(circles), len(segments)
 
 
 def _export_kicad_to_dxf(source_path: Path, output_dxf_path: Path, layers: str | None) -> None:
@@ -293,8 +514,8 @@ def _build_arg_parser():
         help="Number of contour loops to generate, contour mode only (default: 1).",
     )
     parser.add_argument(
-        "-m", "--mode", choices=["contour", "hatch"], default="contour",
-        help="Generation mode: contour offset loops or angled hatch fill (default: contour).",
+        "-m", "--mode", choices=["contour", "hatch", "drill"], default="contour",
+        help="Generation mode: contour offset loops, angled hatch fill, or KiCad drill spirals (default: contour).",
     )
     parser.add_argument(
         "--angle", type=float, default=45.0,
@@ -307,6 +528,18 @@ def _build_arg_parser():
     )
     parser.add_argument("--layer-name", default="F.Cu", help="Layer name for generated geometry (default: F.Cu).")
     parser.add_argument(
+        "--spiral-turns",
+        type=float,
+        default=1.75,
+        help="Turns per inward drill spiral arm, drill mode only (default: 1.75).",
+    )
+    parser.add_argument(
+        "--spiral-inner-ratio",
+        type=float,
+        default=0.10,
+        help="Spiral end radius as ratio of hole radius, drill mode only (default: 0.10).",
+    )
+    parser.add_argument(
         "--invert", action="store_true",
         help="Invert offset direction, contour mode only (offset outward instead of inward).",
     )
@@ -318,6 +551,20 @@ def main(argv: list[str] | None = None) -> int:
     start_offset_mm = args.start_offset / 1000.0
     spacing_mm = args.spacing / 1000.0
     try:
+        if args.mode == "drill":
+            kind = _detect_input_kind(args.source, args.input_format)
+            if kind != "kicad":
+                raise RuntimeError("Drill mode requires a KiCad source (.kicad_pcb or .kicad_pro).")
+            hole_count, segment_count = generate_kicad_drill_spiral_dxf(
+                args.source,
+                args.output_dxf,
+                layer_name=args.layer_name,
+                spiral_turns=args.spiral_turns,
+                spiral_inner_ratio=args.spiral_inner_ratio,
+            )
+            print(f"drill holes: {hole_count}, generated spiral segments: {segment_count} -> {args.output_dxf}")
+            return 0
+
         with _prepared_input_dxf(args.source, args.input_format, args.kicad_layers) as source_dxf_path:
             if args.mode == "hatch":
                 polys, count = generate_hatch_dxf(
