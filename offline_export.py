@@ -283,7 +283,8 @@ def generate_kicad_drill_spiral_dxf(
 
     msp = doc.modelspace()
     for circle_pts in circles:
-        msp.add_lwpolyline(circle_pts, close=True, dxfattribs={"layer": layer_name})
+        closed_pts = list(circle_pts) + [circle_pts[0]]
+        msp.add_lwpolyline(closed_pts, close=False, dxfattribs={"layer": layer_name})
 
     for seg in segments:
         p1, p2 = seg
@@ -393,7 +394,8 @@ def generate_contour_offset_dxf(
         if len(loop) < 3:
             continue
         try:
-            msp.add_lwpolyline(loop, close=True, dxfattribs={"layer": layer_name})
+            closed_loop = list(loop) + [loop[0]]
+            msp.add_lwpolyline(closed_loop, close=False, dxfattribs={"layer": layer_name})
         except Exception:
             continue
 
