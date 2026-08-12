@@ -421,7 +421,8 @@ def _generate_export_dxf_bytes(
 
         modelspace = doc.modelspace()
         for circle in circles:
-            modelspace.add_lwpolyline(circle, close=True, dxfattribs={"layer": layer_name})
+            closed_circle = list(circle) + [circle[0]]
+            modelspace.add_lwpolyline(closed_circle, close=False, dxfattribs={"layer": layer_name})
         for seg in segments:
             p1, p2 = seg
             modelspace.add_line((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0), dxfattribs={"layer": layer_name})
@@ -475,9 +476,11 @@ def _generate_export_dxf_bytes(
             if len(loop) < 3:
                 continue
             try:
-                modelspace.add_lwpolyline(loop, close=True, dxfattribs={"layer": layer_name})
+                closed_loop = list(loop) + [loop[0]]
+                modelspace.add_lwpolyline(closed_loop, close=False, dxfattribs={"layer": layer_name})
             except Exception:
-                modelspace.add_polyline2d(loop, close=True, dxfattribs={"layer": layer_name})
+                closed_loop = list(loop) + [loop[0]]
+                modelspace.add_polyline2d(closed_loop, close=False, dxfattribs={"layer": layer_name})
     else:
         for seg in segments:
             p1, p2 = seg
