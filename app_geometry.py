@@ -518,6 +518,25 @@ def _selected_zone_ids(zone_polys: dict[str, Ring], selected_ids: list) -> list[
     return selected
 
 
+def compute_ring_nesting_depths(polys: list[Ring]) -> list[int]:
+    """Compute containment nesting depth (0 = outermost) for a flat list of rings.
+
+    A ring's depth is the number of other rings in the list that fully contain it.
+    This is used to auto-detect "holes" (odd depth) versus "solid" outlines (even
+    depth) so isolation-routing contours can alternate offset direction without
+    requiring the user to manually flip each nested contour.
+    """
+    n = len(polys)
+    depths = [0] * n
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            if _ring_contains_ring(polys[j], polys[i]):
+                depths[i] += 1
+    return depths
+
+
 def _build_selected_nesting(zone_polys: dict[str, Ring], selected_ids: list[str]) -> tuple[dict[str, str | None], dict[str, int]]:
     parents: dict[str, str | None] = {zid: None for zid in selected_ids}
     sorted_by_area = sorted(selected_ids, key=lambda zid: polygon_area(zone_polys[zid]))
@@ -849,6 +868,34 @@ def generate_hatch_for_selection(
     return segments, stats
 
 
+def resolve_contour_invert_flags(
+    zone_polys: dict[str, Ring],
+    zone_ids: list[str],
+    invert_offset_direction: bool = False,
+    auto_alternate_direction: bool = True,
+) -> dict[str, bool]:
+    """Resolve the effective offset-direction flag for each zone.
+
+    When `auto_alternate_direction` is enabled (the default), the containment
+    nesting depth of each zone among the given `zone_ids` is used to flip the
+    offset direction for zones that sit inside another selected zone (i.e.
+    "holes"), so isolation-routing contours alternate outward/inward
+    automatically instead of requiring every nested contour to be selected
+    and flipped by hand. `invert_offset_direction` sets the base direction
+    applied to the outermost (even depth) zones.
+    """
+    valid_ids = [zid for zid in zone_ids if zid in zone_polys]
+    if not auto_alternate_direction:
+        return {zid: invert_offset_direction for zid in valid_ids}
+
+    polys = [zone_polys[zid] for zid in valid_ids]
+    depths = compute_ring_nesting_depths(polys)
+    return {
+        zid: invert_offset_direction != bool(depth % 2)
+        for zid, depth in zip(valid_ids, depths)
+    }
+
+
 def generate_contour_offsets_for_selection(
     session: UploadSession,
     selected_ids: list,
@@ -856,10 +903,14 @@ def generate_contour_offsets_for_selection(
     spacing: float,
     repetitions: int,
     invert_offset_direction: bool = False,
+    auto_alternate_direction: bool = True,
 ) -> tuple[list[list[list[float]]], dict[str, int]]:
     zone_polys = build_zone_polygons(session.zone_map)
     normalized_ids = [str(zid) for zid in selected_ids]
     normalized_ids.sort(key=lambda zid: polygon_area(zone_polys[zid]) if zid in zone_polys else 0.0, reverse=True)
+    invert_flags = resolve_contour_invert_flags(
+        zone_polys, normalized_ids, invert_offset_direction, auto_alternate_direction
+    )
 
     segments: list[list[list[float]]] = []
     used_zones = 0
@@ -872,7 +923,7 @@ def generate_contour_offsets_for_selection(
             start_offset,
             spacing,
             repetitions,
-            invert_direction=invert_offset_direction,
+            invert_direction=invert_flags.get(zone_id, invert_offset_direction),
         )
         if zone_segments:
             segments.extend(zone_segments)
@@ -904,10 +955,15 @@ def build_contour_loops_for_selection(
     offset_spacing: float,
     offset_count: int,
     invert_offset_direction: bool = False,
+    auto_alternate_direction: bool = True,
 ) -> list[list[tuple[float, float]]]:
     zone_polys = build_zone_polygons(session.zone_map)
+    normalized_ids = [str(z) for z in selected_ids]
+    invert_flags = resolve_contour_invert_flags(
+        zone_polys, normalized_ids, invert_offset_direction, auto_alternate_direction
+    )
     loops: list[list[tuple[float, float]]] = []
-    for zid in [str(z) for z in selected_ids]:
+    for zid in normalized_ids:
         base = zone_polys.get(zid)
         if base is None:
             continue
@@ -917,7 +973,7 @@ def build_contour_loops_for_selection(
                 start_offset,
                 offset_spacing,
                 offset_count,
-                invert_direction=invert_offset_direction,
+                invert_direction=invert_flags.get(zid, invert_offset_direction),
             )
         )
     return loops

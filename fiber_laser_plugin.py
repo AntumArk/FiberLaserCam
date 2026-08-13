@@ -43,6 +43,7 @@ DEFAULT_LAYER_SETTINGS: dict[str, object] = {
     "offsetSpacing": 0.02,
     "offsetCount": 3,
     "invertOffsetDirection": False,
+    "autoAlternateContourDirection": True,
     "hatchAll": True,
     "outerZoneOnly": False,
     "alternateNestingHatch": False,
@@ -106,6 +107,9 @@ def _sanitize_layer_settings(raw: dict[str, object] | None) -> dict[str, object]
         "offsetSpacing": _coerce_float(merged.get("offsetSpacing"), float(DEFAULT_LAYER_SETTINGS["offsetSpacing"])),
         "offsetCount": max(1, _coerce_int(merged.get("offsetCount"), int(DEFAULT_LAYER_SETTINGS["offsetCount"]))),
         "invertOffsetDirection": _coerce_bool(merged.get("invertOffsetDirection"), bool(DEFAULT_LAYER_SETTINGS["invertOffsetDirection"])),
+        "autoAlternateContourDirection": _coerce_bool(
+            merged.get("autoAlternateContourDirection"), bool(DEFAULT_LAYER_SETTINGS["autoAlternateContourDirection"])
+        ),
         "hatchAll": _coerce_bool(merged.get("hatchAll"), bool(DEFAULT_LAYER_SETTINGS["hatchAll"])),
         "outerZoneOnly": _coerce_bool(merged.get("outerZoneOnly"), bool(DEFAULT_LAYER_SETTINGS["outerZoneOnly"])),
         "alternateNestingHatch": _coerce_bool(merged.get("alternateNestingHatch"), bool(DEFAULT_LAYER_SETTINGS["alternateNestingHatch"])),
@@ -353,6 +357,7 @@ def _generate_preview_segments(
         offset_spacing = float(payload.get("offsetSpacing", 0.2))
         offset_count = int(payload.get("offsetCount", 3))
         invert_offset_direction = bool(payload.get("invertOffsetDirection", False))
+        auto_alternate_direction = bool(payload.get("autoAlternateContourDirection", True))
         segments, _ = generate_contour_offsets_for_selection(
             session,
             selected_ids,
@@ -360,6 +365,7 @@ def _generate_preview_segments(
             offset_spacing,
             offset_count,
             invert_offset_direction=invert_offset_direction,
+            auto_alternate_direction=auto_alternate_direction,
         )
         return segments
 
@@ -436,6 +442,7 @@ def _generate_export_dxf_bytes(
         offset_spacing = float(payload.get("offsetSpacing", 0.2))
         offset_count = int(payload.get("offsetCount", 3))
         invert_offset_direction = bool(payload.get("invertOffsetDirection", False))
+        auto_alternate_direction = bool(payload.get("autoAlternateContourDirection", True))
         segments, _ = generate_contour_offsets_for_selection(
             session,
             selected_ids,
@@ -443,6 +450,7 @@ def _generate_export_dxf_bytes(
             offset_spacing,
             offset_count,
             invert_offset_direction=invert_offset_direction,
+            auto_alternate_direction=auto_alternate_direction,
         )
         loops = build_contour_loops_for_selection(
             session,
@@ -451,6 +459,7 @@ def _generate_export_dxf_bytes(
             offset_spacing,
             offset_count,
             invert_offset_direction=invert_offset_direction,
+            auto_alternate_direction=auto_alternate_direction,
         )
     else:
         segments = _generate_preview_segments(session, payload, outer_only_override=outer_only_override)
@@ -530,6 +539,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.offset_spacing_ctrl = wx.TextCtrl(panel)
         self.offset_count_ctrl = wx.TextCtrl(panel)
         self.invert_offset_direction_ctrl = wx.CheckBox(panel, label="Invert offset direction (toward interior)")
+        self.auto_alternate_direction_ctrl = wx.CheckBox(panel, label="Auto-alternate direction for nested contours (holes)")
         self.outer_zone_only_ctrl = wx.CheckBox(panel, label="Outer zone only (largest polygon)")
         self.alternate_nesting_hatch_ctrl = wx.CheckBox(panel, label="Alternate nested contours (text mode)")
 
@@ -550,6 +560,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         add_row("Contour spacing (mm)", self.offset_spacing_ctrl)
         add_row("Contour count", self.offset_count_ctrl)
         add_row("Contour direction", self.invert_offset_direction_ctrl)
+        add_row("Auto-alternate nested direction", self.auto_alternate_direction_ctrl)
         add_row("Edge-cuts cleaning", self.outer_zone_only_ctrl)
         add_row("Nested text hatching", self.alternate_nesting_hatch_ctrl)
 
@@ -585,6 +596,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.mode_choice.Bind(wx.EVT_CHOICE, self._on_settings_changed)
         self.manual_spacing_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
         self.invert_offset_direction_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
+        self.auto_alternate_direction_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
         self.outer_zone_only_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
         self.alternate_nesting_hatch_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
         self.hatch_all_ctrl.Bind(wx.EVT_CHECKBOX, self._on_hatch_all)
@@ -633,6 +645,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             self.offset_spacing_ctrl.SetValue(f"{float(s['offsetSpacing']):.4f}".rstrip("0").rstrip("."))
             self.offset_count_ctrl.SetValue(str(int(s["offsetCount"])))
             self.invert_offset_direction_ctrl.SetValue(bool(s["invertOffsetDirection"]))
+            self.auto_alternate_direction_ctrl.SetValue(bool(s["autoAlternateContourDirection"]))
             self.hatch_all_ctrl.SetValue(bool(s["hatchAll"]))
             self.outer_zone_only_ctrl.SetValue(bool(s["outerZoneOnly"]))
             self.alternate_nesting_hatch_ctrl.SetValue(bool(s["alternateNestingHatch"]))
@@ -681,6 +694,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             "offsetSpacing": offset_spacing,
             "offsetCount": offset_count,
             "invertOffsetDirection": self.invert_offset_direction_ctrl.GetValue(),
+            "autoAlternateContourDirection": self.auto_alternate_direction_ctrl.GetValue(),
             "hatchAll": self.hatch_all_ctrl.GetValue(),
             "outerZoneOnly": self.outer_zone_only_ctrl.GetValue(),
             "alternateNestingHatch": self.alternate_nesting_hatch_ctrl.GetValue(),
@@ -705,6 +719,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.offset_spacing_ctrl.Enable(is_contour)
         self.offset_count_ctrl.Enable(is_contour)
         self.invert_offset_direction_ctrl.Enable(is_contour)
+        self.auto_alternate_direction_ctrl.Enable(is_contour)
         self.outer_zone_only_ctrl.Enable((not is_contour) and (not is_drill))
         self.alternate_nesting_hatch_ctrl.Enable((not is_contour) and (not is_drill) and (not self.outer_zone_only_ctrl.GetValue()))
         self.zone_list.Enable(not is_drill)
@@ -850,6 +865,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             "offsetSpacing": settings["offsetSpacing"],
             "offsetCount": settings["offsetCount"],
             "invertOffsetDirection": settings["invertOffsetDirection"],
+            "autoAlternateContourDirection": settings["autoAlternateContourDirection"],
         }
         return payload, None
 

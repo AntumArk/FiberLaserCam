@@ -9,7 +9,13 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import minidxf as ezdxf
-from app_geometry import DEFAULT_MIN_HATCH_AREA, build_zone_payload_from_dxf_path, collect_entities_as_polygons, generate_hatch_for_selection
+from app_geometry import (
+    DEFAULT_MIN_HATCH_AREA,
+    build_zone_payload_from_dxf_path,
+    collect_entities_as_polygons,
+    compute_ring_nesting_depths,
+    generate_hatch_for_selection,
+)
 from app_sessions import UploadSession
 
 try:
@@ -364,13 +370,20 @@ def generate_contour_offset_dxf(
     repetitions: int,
     layer_name: str = "F.Cu",
     invert_direction: bool = False,
+    auto_alternate_direction: bool = True,
 ) -> tuple[int, int]:
     source_doc = ezdxf.readfile(str(source_dxf_path))
     polys = _collect_polygons_from_dxf(source_doc)
 
+    if auto_alternate_direction and polys:
+        depths = compute_ring_nesting_depths(polys)
+    else:
+        depths = [0] * len(polys)
+
     loops: list[list[tuple[float, float]]] = []
-    for poly in polys:
-        loops.extend(generate_contour_offset_loops(poly, start_offset, spacing, repetitions, invert_direction))
+    for poly, depth in zip(polys, depths):
+        poly_invert = invert_direction != bool(depth % 2) if auto_alternate_direction else invert_direction
+        loops.extend(generate_contour_offset_loops(poly, start_offset, spacing, repetitions, poly_invert))
 
     if not loops:
         raise RuntimeError(
@@ -409,13 +422,20 @@ def preview_contour_offset_counts(
     start_offset: float,
     spacing: float,
     repetitions: int,
+    auto_alternate_direction: bool = True,
 ) -> tuple[int, int]:
     source_doc = ezdxf.readfile(str(source_dxf_path))
     polys = _collect_polygons_from_dxf(source_doc)
 
+    if auto_alternate_direction and polys:
+        depths = compute_ring_nesting_depths(polys)
+    else:
+        depths = [0] * len(polys)
+
     loops: list[list[tuple[float, float]]] = []
-    for poly in polys:
-        loops.extend(generate_contour_offset_loops(poly, start_offset, spacing, repetitions))
+    for poly, depth in zip(polys, depths):
+        poly_invert = bool(depth % 2) if auto_alternate_direction else False
+        loops.extend(generate_contour_offset_loops(poly, start_offset, spacing, repetitions, poly_invert))
 
     return len(polys), len(loops)
 
@@ -545,6 +565,12 @@ def _build_arg_parser():
         "--invert", action="store_true",
         help="Invert offset direction, contour mode only (offset outward instead of inward).",
     )
+    parser.add_argument(
+        "--no-auto-alternate", action="store_true",
+        help="Disable automatic direction alternation for nested contours (holes), contour mode only. "
+        "By default, contours nested inside another contour (holes) automatically use the opposite "
+        "offset direction.",
+    )
     return parser
 
 
@@ -587,6 +613,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.repetitions,
                     args.layer_name,
                     args.invert,
+                    auto_alternate_direction=not args.no_auto_alternate,
                 )
                 print(f"source polygons: {polys}, generated loops: {count} -> {args.output_dxf}")
     except Exception as exc:
