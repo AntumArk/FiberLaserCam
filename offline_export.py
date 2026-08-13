@@ -27,6 +27,11 @@ except ImportError:
         loop_to_segments,
     )
 
+try:
+    import pcbnew_geometry
+except ImportError:
+    from kicad_plugin import pcbnew_geometry
+
 
 def _collect_polygons_from_dxf(doc: ezdxf.Drawing) -> list[list[tuple[float, float]]]:
     return collect_entities_as_polygons(doc)
@@ -484,9 +489,20 @@ def generate_contour_offset_dxf(
             "Check selected export layers and contour parameters."
         )
 
+    insunits = source_doc.header.get("$INSUNITS") if "$INSUNITS" in source_doc.header else None
+    _write_loops_dxf(loops, output_dxf_path, layer_name, insunits=insunits)
+    return len(polys), len(loops)
+
+
+def _write_loops_dxf(
+    loops: list[list[tuple[float, float]]],
+    output_dxf_path: Path,
+    layer_name: str,
+    insunits: int | None = None,
+) -> None:
     out_doc = ezdxf.new("R2000")
-    if "$INSUNITS" in source_doc.header:
-        out_doc.header["$INSUNITS"] = source_doc.header["$INSUNITS"]
+    if insunits is not None:
+        out_doc.header["$INSUNITS"] = insunits
 
     for header_key in ("$PDMODE", "$PDSIZE"):
         if header_key in out_doc.header:
@@ -507,7 +523,58 @@ def generate_contour_offset_dxf(
 
     output_dxf_path.parent.mkdir(parents=True, exist_ok=True)
     out_doc.saveas(str(output_dxf_path))
-    return len(polys), len(loops)
+
+
+def generate_contour_offset_dxf_from_board(
+    board_source,
+    output_dxf_path: Path,
+    start_offset: float,
+    spacing: float,
+    repetitions: int,
+    layer_name: str = "F.Cu",
+    invert_direction: bool = False,
+    auto_alternate_direction: bool = True,
+) -> tuple[int, int]:
+    """pcbnew-native counterpart to ``generate_contour_offset_dxf``.
+
+    Generates isolation-routing contour loops directly from a KiCad board
+    (a ``.kicad_pcb``/``.kicad_pro`` path, or an already-loaded
+    ``pcbnew.BOARD`` from the live GUI plugin) using KiCad's own
+    Clipper-backed polygon engine (see ``pcbnew_geometry.py``) instead of
+    exporting to DXF and re-parsing it. Requires ``pcbnew`` to be importable
+    (raises ``RuntimeError`` otherwise); callers should fall back to
+    ``generate_contour_offset_dxf`` when it is not available.
+    """
+    if not pcbnew_geometry.is_pcbnew_available():
+        raise RuntimeError(
+            "pcbnew module is not importable in this Python environment; "
+            "the pcbnew-native geometry source is unavailable here. "
+            "Use the DXF-based export instead, or run via KiCad's own "
+            "Python interpreter."
+        )
+
+    board = pcbnew_geometry.load_board(board_source)
+    layer_id = pcbnew_geometry.resolve_layer_id(board, layer_name)
+    net_count = len(pcbnew_geometry.build_net_polygons_for_layer(board, layer_id))
+
+    loops = pcbnew_geometry.generate_contour_offsets_from_board(
+        board,
+        layer_name,
+        start_offset,
+        spacing,
+        repetitions,
+        invert_direction=invert_direction,
+        auto_alternate_direction=auto_alternate_direction,
+    )
+
+    if not loops:
+        raise RuntimeError(
+            "No contour loops generated from board. "
+            "Check selected layer and contour parameters."
+        )
+
+    _write_loops_dxf(loops, output_dxf_path, layer_name)
+    return net_count, len(loops)
 
 
 def preview_contour_offset_counts(
@@ -703,6 +770,15 @@ def _build_arg_parser():
         "offset direction.",
     )
     parser.add_argument(
+        "--geometry-source",
+        choices=["dxf", "pcbnew"],
+        default="dxf",
+        help="Geometry backend for contour mode with a KiCad source (default: dxf, using "
+        "kicad-cli DXF export). 'pcbnew' uses KiCad's own Python bindings and Clipper-backed "
+        "polygon engine directly (no DXF export step); requires running under a Python that "
+        "can import 'pcbnew' (KiCad's bundled interpreter, or a system KiCad install).",
+    )
+    parser.add_argument(
         "--export-all",
         type=Path,
         default=None,
@@ -760,6 +836,23 @@ def run_export_all(source: Path, config_path: Path, output_dir: Path) -> list[st
         output_path = output_dir / output_name
 
         mode = str(entry.get("mode", "contour"))
+        geometry_source = str(entry.get("geometry_source", "dxf"))
+
+        if mode == "contour" and geometry_source == "pcbnew":
+            board_path = _resolve_board_path(source)
+            generate_contour_offset_dxf_from_board(
+                board_path,
+                output_path,
+                float(entry.get("start_offset_mm", 0.02)),
+                float(entry.get("spacing_mm", 0.02)),
+                int(entry.get("repetitions", 3)),
+                layer_name=layer,
+                invert_direction=bool(entry.get("invert", False)),
+                auto_alternate_direction=bool(entry.get("auto_alternate", True)),
+            )
+            written.append(str(output_path))
+            continue
+
         with _prepared_input_dxf(source, "kicad", layer) as source_dxf_path:
             if mode == "hatch":
                 generate_hatch_dxf(
@@ -821,6 +914,24 @@ def main(argv: list[str] | None = None) -> int:
                 contour_count=args.drill_contour_count,
             )
             print(f"drill holes: {hole_count}, generated {args.drill_style} segments: {segment_count} -> {args.output_dxf}")
+            return 0
+
+        if args.mode == "contour" and args.geometry_source == "pcbnew":
+            kind = _detect_input_kind(args.source, args.input_format)
+            if kind != "kicad":
+                raise RuntimeError("--geometry-source pcbnew requires a KiCad source (.kicad_pcb or .kicad_pro).")
+            board_path = _resolve_board_path(args.source)
+            net_count, count = generate_contour_offset_dxf_from_board(
+                board_path,
+                args.output_dxf,
+                start_offset_mm,
+                spacing_mm,
+                args.repetitions,
+                args.layer_name,
+                args.invert,
+                auto_alternate_direction=not args.no_auto_alternate,
+            )
+            print(f"source nets: {net_count}, generated loops: {count} -> {args.output_dxf}")
             return 0
 
         with _prepared_input_dxf(args.source, args.input_format, args.kicad_layers) as source_dxf_path:

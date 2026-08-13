@@ -159,6 +159,26 @@ Use `--mode drill` to generate a separate drill DXF from KiCad board/project inp
 
 Each `layers` entry is either a KiCad layer (`mode: "contour"` or `mode: "hatch"`, with the same parameters as the single-layer CLI flags) or `"kind": "drill"` for the board's drill holes. An optional `output` key sets the file name; otherwise it defaults to `<source-stem>_<layer>.dxf`. The KiCad plugin's **Export All Layers...** button writes a matching config file (`<board-stem>_export_all_config.json`) alongside the exported DXFs for reference or reuse from the CLI.
 
+### pcbnew-Native Geometry Source (Contour Mode)
+
+Contour mode with a KiCad source normally exports the layer to DXF via `kicad-cli` and reconstructs polygons from it. As an alternative, `--geometry-source pcbnew` (single-layer CLI) or `"geometry_source": "pcbnew"` (per-layer in an `--export-all` config, contour entries only) generates the contour loops directly from KiCad's own board/net data using `pcbnew_geometry.py`, skipping the DXF export step entirely:
+
+```bash
+./FiberLaserCam-*.AppImage board.kicad_pcb output.dxf --geometry-source pcbnew --layer-name F.Cu -s 50 -i 100 -n 6
+```
+
+```json
+{"layer": "F.Cu", "mode": "contour", "geometry_source": "pcbnew", "start_offset_mm": 0.05, "spacing_mm": 0.1, "repetitions": 6}
+```
+
+Benefits over the DXF path:
+
+- Same-net pads/tracks/zones are merged with KiCad's own `SHAPE_POLY_SET.Simplify()` (net-code aware), instead of a geometric touching heuristic on separately-exported polygons.
+- Offsetting uses `SHAPE_POLY_SET.Inflate()` (Clipper-backed), avoiding self-intersecting artifacts that a naive per-vertex miter join can produce on tight concave curves.
+- Overcut prevention between different nets uses exact `BooleanIntersection()` checks instead of segment-intersection heuristics.
+- No `kicad-cli` subprocess call for the layer(s) using this source.
+
+Requirement: this path needs the `pcbnew` Python module to be importable in the process running the export. That's automatic for the **live GUI plugin** (already running inside KiCad's own Python), but for CLI/offline use it means running the exporter through a Python that has `pcbnew` on its path -- KiCad's own bundled interpreter, or a system KiCad install where `pcbnew` is on `sys.path`. If `pcbnew` isn't importable, `--geometry-source pcbnew` raises a clear error; omit the flag (or use `"geometry_source": "dxf"`, the default) to use the regular `kicad-cli`-based path instead, which has no such requirement.
 
 ### PCM Package Notes
 
