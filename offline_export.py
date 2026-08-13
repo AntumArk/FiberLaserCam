@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 import shutil
@@ -19,9 +20,12 @@ from app_geometry import (
 from app_sessions import UploadSession
 
 try:
-    from contour_offsets import generate_contour_offset_loops
+    from contour_offsets import generate_contour_offset_loops_multi, loop_to_segments
 except ImportError:
-    from kicad_plugin.contour_offsets import generate_contour_offset_loops
+    from kicad_plugin.contour_offsets import (
+        generate_contour_offset_loops_multi,
+        loop_to_segments,
+    )
 
 
 def _collect_polygons_from_dxf(doc: ezdxf.Drawing) -> list[list[tuple[float, float]]]:
@@ -266,17 +270,104 @@ def build_kicad_drill_spiral_geometry(
     return circles, segments
 
 
-def generate_kicad_drill_spiral_dxf(
+# Default drill "regular contours" style: 4 concentric inward loops, 0.05mm apart,
+# starting 0.05mm in from the hole edge. This is now the default drill style; the
+# older "spiral" style remains available as an alternative (DRILL_STYLES).
+DEFAULT_DRILL_CONTOUR_START_OFFSET = 0.05
+DEFAULT_DRILL_CONTOUR_SPACING = 0.05
+DEFAULT_DRILL_CONTOUR_COUNT = 4
+DRILL_STYLES = ("contour", "spiral")
+DEFAULT_DRILL_STYLE = "contour"
+
+
+def build_kicad_drill_contour_geometry(
+    source_path: Path,
+    start_offset: float = DEFAULT_DRILL_CONTOUR_START_OFFSET,
+    spacing: float = DEFAULT_DRILL_CONTOUR_SPACING,
+    repetitions: int = DEFAULT_DRILL_CONTOUR_COUNT,
+) -> tuple[list[list[tuple[float, float]]], list[list[list[float]]]]:
+    """Generate inward-facing concentric contour loops for each KiCad drill hole.
+
+    Each hole's outer boundary circle is offset inward (toward the hole center)
+    `repetitions` times, `spacing` mm apart, starting `start_offset` mm in from
+    the edge - similar to the isolation-routing contour_offsets mode, but
+    applied per drill hole instead of per copper zone.
+    """
+    board_path = _resolve_board_path(source_path)
+    holes = _collect_kicad_drill_holes(board_path)
+    if not holes:
+        raise RuntimeError("No drill holes were detected in the KiCad board.")
+
+    circles: list[list[tuple[float, float]]] = []
+    rings: list[list[tuple[float, float]]] = []
+    for cx, cy, diameter in holes:
+        radius = diameter * 0.5
+        if radius <= 0:
+            continue
+        ring = _sample_circle_points(cx, cy, radius, segments=72)
+        circles.append(ring)
+        rings.append(ring)
+
+    # Generate all holes' contours together (rather than independently) so that
+    # closely-spaced holes (e.g. adjacent vias) get the same overlap-prevention
+    # behavior as copper zones in generate_contour_offset_loops_multi, instead
+    # of potentially overcutting the material between them.
+    loops_per_hole = generate_contour_offset_loops_multi(
+        rings, start_offset, spacing, repetitions, invert_flags=[True] * len(rings)
+    )
+
+    segments: list[list[list[float]]] = []
+    for hole_loops in loops_per_hole:
+        for loop in hole_loops:
+            segments.extend(loop_to_segments(loop))
+
+    return circles, segments
+
+
+def build_kicad_drill_geometry(
+    source_path: Path,
+    style: str = DEFAULT_DRILL_STYLE,
+    spiral_turns: float = 1.75,
+    spiral_inner_ratio: float = 0.10,
+    contour_start_offset: float = DEFAULT_DRILL_CONTOUR_START_OFFSET,
+    contour_spacing: float = DEFAULT_DRILL_CONTOUR_SPACING,
+    contour_count: int = DEFAULT_DRILL_CONTOUR_COUNT,
+) -> tuple[list[list[tuple[float, float]]], list[list[list[float]]]]:
+    if style == "spiral":
+        return build_kicad_drill_spiral_geometry(
+            source_path,
+            spiral_turns=spiral_turns,
+            spiral_inner_ratio=spiral_inner_ratio,
+        )
+    if style == "contour":
+        return build_kicad_drill_contour_geometry(
+            source_path,
+            start_offset=contour_start_offset,
+            spacing=contour_spacing,
+            repetitions=contour_count,
+        )
+    raise RuntimeError(f"Unknown drill style: {style!r}. Expected one of {DRILL_STYLES}.")
+
+
+def generate_kicad_drill_dxf(
     source_path: Path,
     output_dxf_path: Path,
     layer_name: str = "DRILL_GEN",
+    style: str = DEFAULT_DRILL_STYLE,
     spiral_turns: float = 1.75,
     spiral_inner_ratio: float = 0.10,
+    contour_start_offset: float = DEFAULT_DRILL_CONTOUR_START_OFFSET,
+    contour_spacing: float = DEFAULT_DRILL_CONTOUR_SPACING,
+    contour_count: int = DEFAULT_DRILL_CONTOUR_COUNT,
 ) -> tuple[int, int]:
-    circles, segments = build_kicad_drill_spiral_geometry(
+    circles, segments = build_kicad_drill_geometry(
         source_path,
+        style=style,
         spiral_turns=spiral_turns,
         spiral_inner_ratio=spiral_inner_ratio,
+        contour_start_offset=contour_start_offset,
+        contour_spacing=contour_spacing,
+        contour_count=contour_count,
     )
     if not circles:
         raise RuntimeError("No drill holes were detected in the KiCad board.")
@@ -380,10 +471,12 @@ def generate_contour_offset_dxf(
     else:
         depths = [0] * len(polys)
 
-    loops: list[list[tuple[float, float]]] = []
-    for poly, depth in zip(polys, depths):
-        poly_invert = invert_direction != bool(depth % 2) if auto_alternate_direction else invert_direction
-        loops.extend(generate_contour_offset_loops(poly, start_offset, spacing, repetitions, poly_invert))
+    invert_flags = [
+        (invert_direction != bool(depth % 2)) if auto_alternate_direction else invert_direction
+        for depth in depths
+    ]
+    loops_per_poly = generate_contour_offset_loops_multi(polys, start_offset, spacing, repetitions, invert_flags)
+    loops: list[list[tuple[float, float]]] = [loop for poly_loops in loops_per_poly for loop in poly_loops]
 
     if not loops:
         raise RuntimeError(
@@ -432,10 +525,9 @@ def preview_contour_offset_counts(
     else:
         depths = [0] * len(polys)
 
-    loops: list[list[tuple[float, float]]] = []
-    for poly, depth in zip(polys, depths):
-        poly_invert = bool(depth % 2) if auto_alternate_direction else False
-        loops.extend(generate_contour_offset_loops(poly, start_offset, spacing, repetitions, poly_invert))
+    invert_flags = [bool(depth % 2) if auto_alternate_direction else False for depth in depths]
+    loops_per_poly = generate_contour_offset_loops_multi(polys, start_offset, spacing, repetitions, invert_flags)
+    loops: list[list[tuple[float, float]]] = [loop for poly_loops in loops_per_poly for loop in poly_loops]
 
     return len(polys), len(loops)
 
@@ -449,6 +541,8 @@ def generate_hatch_dxf(
     laser_radius: float = 0.01,
     min_area: float = DEFAULT_MIN_HATCH_AREA,
     alternate_nesting_hatch: bool = False,
+    invert_alternate_nesting: bool = False,
+    multi_angle_hatch: bool = False,
 ) -> tuple[int, int]:
     zones, zone_map = build_zone_payload_from_dxf_path(str(source_dxf_path))
     session = UploadSession(
@@ -469,6 +563,8 @@ def generate_hatch_dxf(
         min_area,
         False,
         alternate_nesting_hatch,
+        invert_alternate_nesting,
+        multi_angle_hatch,
     )
 
     if not segments:
@@ -548,18 +644,53 @@ def _build_arg_parser():
         action="store_true",
         help="Hatch alternating nested contours (outer hatched, inner skipped, next nested hatched), useful for text islands.",
     )
+    parser.add_argument(
+        "--invert-alternate-nesting",
+        action="store_true",
+        help="Invert which nesting parity gets hatched with --alternate-nesting (outer skipped, inner hatched instead).",
+    )
+    parser.add_argument(
+        "--multi-angle",
+        action="store_true",
+        help="Overlay hatch lines at 0, 45, and 90 degrees together for more even coverage, instead of a single --angle pass.",
+    )
     parser.add_argument("--layer-name", default="F.Cu", help="Layer name for generated geometry (default: F.Cu).")
     parser.add_argument(
         "--spiral-turns",
         type=float,
         default=1.75,
-        help="Turns per inward drill spiral arm, drill mode only (default: 1.75).",
+        help="Turns per inward drill spiral arm, drill mode with --drill-style spiral only (default: 1.75).",
     )
     parser.add_argument(
         "--spiral-inner-ratio",
         type=float,
         default=0.10,
-        help="Spiral end radius as ratio of hole radius, drill mode only (default: 0.10).",
+        help="Spiral end radius as ratio of hole radius, drill mode with --drill-style spiral only (default: 0.10).",
+    )
+    parser.add_argument(
+        "--drill-style",
+        choices=list(DRILL_STYLES),
+        default=DEFAULT_DRILL_STYLE,
+        help="Drill mode geometry style: 'contour' for regular inward concentric loops (default), "
+        "or 'spiral' for inward spiral arms.",
+    )
+    parser.add_argument(
+        "--drill-contour-start-offset",
+        type=float,
+        default=DEFAULT_DRILL_CONTOUR_START_OFFSET,
+        help=f"First inward contour offset from hole edge in mm, --drill-style contour only (default: {DEFAULT_DRILL_CONTOUR_START_OFFSET}).",
+    )
+    parser.add_argument(
+        "--drill-contour-spacing",
+        type=float,
+        default=DEFAULT_DRILL_CONTOUR_SPACING,
+        help=f"Spacing between drill contour loops in mm, --drill-style contour only (default: {DEFAULT_DRILL_CONTOUR_SPACING}).",
+    )
+    parser.add_argument(
+        "--drill-contour-count",
+        type=int,
+        default=DEFAULT_DRILL_CONTOUR_COUNT,
+        help=f"Number of inward drill contour loops (perimeters), --drill-style contour only (default: {DEFAULT_DRILL_CONTOUR_COUNT}).",
     )
     parser.add_argument(
         "--invert", action="store_true",
@@ -571,7 +702,92 @@ def _build_arg_parser():
         "By default, contours nested inside another contour (holes) automatically use the opposite "
         "offset direction.",
     )
+    parser.add_argument(
+        "--export-all",
+        type=Path,
+        default=None,
+        metavar="CONFIG_JSON",
+        help="Export multiple layers to separate DXF files driven by a JSON config file "
+        "(see README for the schema). When set, 'source' must be a KiCad board/project file "
+        "and 'output_dxf' is treated as the output directory instead of a single file.",
+    )
     return parser
+
+
+def run_export_all(source: Path, config_path: Path, output_dir: Path) -> list[str]:
+    """Export multiple layers from a single KiCad board to separate DXF files.
+
+    Each entry of the JSON config's "layers" list describes either a KiCad
+    layer to hatch/contour, or the drill holes, and is written out to its own
+    DXF file (the machine used by this project cannot combine several layers
+    into one file). See README.md for the config schema.
+    """
+    config = json.loads(config_path.read_text())
+    entries = config.get("layers", [])
+    if not isinstance(entries, list) or not entries:
+        raise RuntimeError("Export-all config must contain a non-empty 'layers' list.")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+
+    for entry in entries:
+        kind = str(entry.get("kind", "layer"))
+        output_name = entry.get("output")
+
+        if kind == "drill":
+            if not output_name:
+                output_name = f"{source.stem}_Drill.dxf"
+            output_path = output_dir / output_name
+            generate_kicad_drill_dxf(
+                source,
+                output_path,
+                layer_name=str(entry.get("layer_name", "DRILL_GEN")),
+                style=str(entry.get("style", DEFAULT_DRILL_STYLE)),
+                spiral_turns=float(entry.get("spiral_turns", 1.75)),
+                spiral_inner_ratio=float(entry.get("spiral_inner_ratio", 0.10)),
+                contour_start_offset=float(entry.get("contour_start_offset", DEFAULT_DRILL_CONTOUR_START_OFFSET)),
+                contour_spacing=float(entry.get("contour_spacing", DEFAULT_DRILL_CONTOUR_SPACING)),
+                contour_count=int(entry.get("contour_count", DEFAULT_DRILL_CONTOUR_COUNT)),
+            )
+            written.append(str(output_path))
+            continue
+
+        layer = str(entry.get("layer"))
+        if not layer:
+            raise RuntimeError(f"Export-all layer entry is missing 'layer': {entry}")
+        if not output_name:
+            output_name = f"{source.stem}_{layer.replace('.', '_').replace('/', '_')}.dxf"
+        output_path = output_dir / output_name
+
+        mode = str(entry.get("mode", "contour"))
+        with _prepared_input_dxf(source, "kicad", layer) as source_dxf_path:
+            if mode == "hatch":
+                generate_hatch_dxf(
+                    source_dxf_path,
+                    output_path,
+                    float(entry.get("angle", 45.0)),
+                    float(entry.get("spacing_mm", 0.02)),
+                    layer_name=layer,
+                    laser_radius=float(entry.get("laser_radius_mm", 0.01)),
+                    min_area=float(entry.get("min_area", DEFAULT_MIN_HATCH_AREA)),
+                    alternate_nesting_hatch=bool(entry.get("alternate_nesting", False)),
+                    invert_alternate_nesting=bool(entry.get("invert_alternate_nesting", False)),
+                    multi_angle_hatch=bool(entry.get("multi_angle", False)),
+                )
+            else:
+                generate_contour_offset_dxf(
+                    source_dxf_path,
+                    output_path,
+                    float(entry.get("start_offset_mm", 0.02)),
+                    float(entry.get("spacing_mm", 0.02)),
+                    int(entry.get("repetitions", 3)),
+                    layer_name=layer,
+                    invert_direction=bool(entry.get("invert", False)),
+                    auto_alternate_direction=bool(entry.get("auto_alternate", True)),
+                )
+        written.append(str(output_path))
+
+    return written
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -579,18 +795,32 @@ def main(argv: list[str] | None = None) -> int:
     start_offset_mm = args.start_offset / 1000.0
     spacing_mm = args.spacing / 1000.0
     try:
+        if args.export_all is not None:
+            kind = _detect_input_kind(args.source, args.input_format)
+            if kind != "kicad":
+                raise RuntimeError("--export-all requires a KiCad source (.kicad_pcb or .kicad_pro).")
+            written = run_export_all(args.source, args.export_all, args.output_dxf)
+            for path in written:
+                print(f"wrote {path}")
+            print(f"export-all complete: {len(written)} file(s) -> {args.output_dxf}")
+            return 0
+
         if args.mode == "drill":
             kind = _detect_input_kind(args.source, args.input_format)
             if kind != "kicad":
                 raise RuntimeError("Drill mode requires a KiCad source (.kicad_pcb or .kicad_pro).")
-            hole_count, segment_count = generate_kicad_drill_spiral_dxf(
+            hole_count, segment_count = generate_kicad_drill_dxf(
                 args.source,
                 args.output_dxf,
                 layer_name=args.layer_name,
+                style=args.drill_style,
                 spiral_turns=args.spiral_turns,
                 spiral_inner_ratio=args.spiral_inner_ratio,
+                contour_start_offset=args.drill_contour_start_offset,
+                contour_spacing=args.drill_contour_spacing,
+                contour_count=args.drill_contour_count,
             )
-            print(f"drill holes: {hole_count}, generated spiral segments: {segment_count} -> {args.output_dxf}")
+            print(f"drill holes: {hole_count}, generated {args.drill_style} segments: {segment_count} -> {args.output_dxf}")
             return 0
 
         with _prepared_input_dxf(args.source, args.input_format, args.kicad_layers) as source_dxf_path:
@@ -602,6 +832,8 @@ def main(argv: list[str] | None = None) -> int:
                     spacing_mm,
                     args.layer_name,
                     alternate_nesting_hatch=args.alternate_nesting,
+                    invert_alternate_nesting=args.invert_alternate_nesting,
+                    multi_angle_hatch=args.multi_angle,
                 )
                 print(f"source polygons: {polys}, generated hatch segments: {count} -> {args.output_dxf}")
             else:

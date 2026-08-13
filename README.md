@@ -8,6 +8,7 @@ KiCad plugin for converting PCB geometry into hatch lines or contour offsets for
 2. In the settings dialog, choose the layer, mode, and parameters.
 3. For full-board cleanup, select `Edge.Cuts` and enable `Outer zone only (largest polygon)`.
 4. Click **Preview** to review the output inline, or **Export** to save immediately.
+5. Use **Export All Layers...** to export F.Cu, B.Cu, Edge.Cuts, F.Mask, B.Mask, and drill holes to separate DXF files in one go.
 
 ![Plugin Dialog](img/fiberLaserWindow.png)
 
@@ -16,11 +17,15 @@ KiCad plugin for converting PCB geometry into hatch lines or contour offsets for
 - Detect closed zones from polylines, circles, and closed linework
 - Visualize each zone with unique colors inside the dialog
 - Select or deselect individual zones for processing
+- Pan (drag) and zoom (scroll wheel, cursor-centered) the preview canvas; double-click or middle-click to reset the view
 - Preview generated hatch lines or contour offsets inline with controls:
-  - Hatch angle (degrees)
+  - Hatch angle (degrees), or overlay 0/45/90 degree passes with multi-angle hatch
   - Hatch spacing
   - Laser radius (inward offset)
-- Export a DXF with hatch lines or offsets added on layer `HATCH_GEN`
+  - Invert alternate-nesting parity for text-style hatching
+- Drill holes can use regular concentric contour loops (default) or inward spirals
+- Contour offsets automatically stop growing between nearby features (e.g. close pads) instead of overlapping and overcutting the material
+- Export a DXF with hatch lines or offsets added on layer `HATCH_GEN`, or export every standard layer to its own DXF file with **Export All Layers...**
 
 ## Preferred Workflow
 
@@ -104,23 +109,55 @@ chmod +x FiberLaserCam-*.AppImage
 # Hatch fill
 ./FiberLaserCam-*.AppImage source.dxf output.dxf --mode hatch --angle 45 -i 2000
 
-# Hatch alternating nested contours (good for text islands)
+# Hatch alternating nested contours (good for text islands), optionally inverted
 ./FiberLaserCam-*.AppImage source.dxf output.dxf --mode hatch --angle 45 -i 2000 --alternate-nesting
+./FiberLaserCam-*.AppImage source.dxf output.dxf --mode hatch --angle 45 -i 2000 --alternate-nesting --invert-alternate-nesting
+
+# Multi-angle hatch: overlay 0/45/90 degree passes for more even coverage
+./FiberLaserCam-*.AppImage source.dxf output.dxf --mode hatch -i 2000 --multi-angle
 
 # Directly from a KiCad project (auto-detects .kicad_pro/.kicad_pcb)
 ./FiberLaserCam-*.AppImage board.kicad_pro output.dxf --mode hatch -i 2000 --kicad-layers F.Cu,Edge.Cuts
 
-# Drill spirals from KiCad drill data (3 inward spirals per hole, 120 deg apart)
-./FiberLaserCam-*.AppImage board.kicad_pro drill_spirals.dxf --mode drill --layer-name DRILL_GEN
+# Drill holes: regular concentric contour loops (default style)
+./FiberLaserCam-*.AppImage board.kicad_pro drill.dxf --mode drill --layer-name DRILL_GEN
+
+# Drill holes: inward spiral style instead
+./FiberLaserCam-*.AppImage board.kicad_pro drill.dxf --mode drill --drill-style spiral
+
+# Export every standard layer (F.Cu, B.Cu, Edge.Cuts, F.Mask, B.Mask, drill) to
+# separate DXF files in one go, driven by a JSON config (see below)
+./FiberLaserCam-*.AppImage board.kicad_pcb ./export_out --export-all export_all_config.json
 ```
 
 Short options: `-s` start offset, `-i` spacing (both in microns), `-n` repetitions. Add `--invert` to offset outward instead of inward. Input selection defaults to `--input-format auto` and can be forced with `--input-format dxf|kicad`. Use `--kicad-layers` to pass an explicit layer list for KiCad source exports. Run with `--help` for the full option list. This tool wraps `offline_export.generate_contour_offset_dxf()` / `generate_hatch_dxf()`, the same functions used internally by the KiCad plugin.
 
-For text-style geometry, enable `--alternate-nesting` to hatch by contour nesting depth: depth 0 hatched, depth 1 skipped, depth 2 hatched, and so on.
+For text-style geometry, enable `--alternate-nesting` to hatch by contour nesting depth: depth 0 hatched, depth 1 skipped, depth 2 hatched, and so on. Add `--invert-alternate-nesting` to flip which parity gets hatched (depth 0 skipped, depth 1 hatched instead). Add `--multi-angle` to overlay hatch lines at 0, 45, and 90 degrees together instead of a single `--angle` pass, for more even coverage.
 
 In contour mode, nested contours (holes) automatically use the opposite offset direction from their enclosing contour, based on containment nesting depth, so isolation-routing passes alternate outward/inward without manually flipping each nested contour. Pass `--no-auto-alternate` to disable this and apply `--invert` uniformly to every contour instead.
 
-Use `--mode drill` to generate a separate drill DXF from KiCad board/project input. Each drill hole gets an outer contour at drill diameter plus 3 inward spirals offset by 120 degrees. Tune spiral density with `--spiral-turns` and `--spiral-inner-ratio`.
+When two separate polygons (e.g. two nearby pads) are close enough that their offset contours would start to cross or overlap, contour generation automatically stops growing both of them from that point onward — like a 3D-printing slicer stopping perimeter shells once they would collide with a neighboring feature. This prevents overcutting the material with duplicate passes over the same area; there is no setting to disable this since it only ever removes loops that would otherwise overlap.
+
+Use `--mode drill` to generate a separate drill DXF from KiCad board/project input. `--drill-style contour` (the default) generates 4 inward concentric contour loops per hole, 0.05mm apart, starting 0.05mm from the edge; tune with `--drill-contour-start-offset`, `--drill-contour-spacing`, and `--drill-contour-count`. `--drill-style spiral` instead generates an outer contour at drill diameter plus 3 inward spiral arms offset by 120 degrees; tune with `--spiral-turns` and `--spiral-inner-ratio`.
+
+### Export All / JSON Config
+
+`--export-all CONFIG_JSON` exports every layer described in a JSON config to its own DXF file in one run (the target machine cannot combine several layers into a single file). `source` must be a KiCad board/project file, and `output_dxf` is treated as the output directory instead of a single file path. Example config:
+
+```json
+{
+  "layers": [
+    {"layer": "F.Cu", "mode": "contour", "start_offset_mm": 0.05, "spacing_mm": 0.1, "repetitions": 6},
+    {"layer": "B.Cu", "mode": "contour", "start_offset_mm": 0.05, "spacing_mm": 0.1, "repetitions": 6},
+    {"layer": "Edge.Cuts", "mode": "hatch", "angle": 45, "spacing_mm": 0.1},
+    {"layer": "F.Mask", "mode": "hatch", "angle": 45, "spacing_mm": 0.1},
+    {"layer": "B.Mask", "mode": "hatch", "angle": 45, "spacing_mm": 0.1},
+    {"kind": "drill", "style": "contour"}
+  ]
+}
+```
+
+Each `layers` entry is either a KiCad layer (`mode: "contour"` or `mode: "hatch"`, with the same parameters as the single-layer CLI flags) or `"kind": "drill"` for the board's drill holes. An optional `output` key sets the file name; otherwise it defaults to `<source-stem>_<layer>.dxf`. The KiCad plugin's **Export All Layers...** button writes a matching config file (`<board-stem>_export_all_config.json`) alongside the exported DXFs for reference or reuse from the CLI.
 
 
 ### PCM Package Notes
@@ -172,8 +209,8 @@ These settings exist in the KiCad plugin dialog. The cutting impact notes descri
 
 - `Hatching mode`
   - `hatch`: generates line hatch fills.
-  - `contour_offsets`: generates inward contour loops.
-  - `drill_spirals`: generates drill-hole contours with three inward spiral arms per hole from KiCad drill data.
+  - `contour_offsets`: generates inward or outward contour loops (isolation routing).
+  - `drill`: generates drill-hole geometry from KiCad drill data, using the chosen `Drill style`.
   - Cutting impact: hatch usually deposits more heat over area; contour offsets may reduce fill density but can still overheat if spacing is tight.
 
 #### Hatch Mode Settings
@@ -210,6 +247,14 @@ These settings exist in the KiCad plugin dialog. The cutting impact notes descri
   - What it does: hatches contour nesting levels in alternating parity (outer filled, first inner skipped, next inner filled).
   - Cutting impact: preserves enclosed islands in text-like geometry and avoids over-filling counters.
 
+- `Invert nested hatching`
+  - What it does: flips which nesting parity gets hatched when `Alternate nested contours` is enabled (outer skipped, first inner filled instead).
+  - Cutting impact: useful when the default parity leaves the wrong side of a text/island feature filled.
+
+- `Multi-angle hatch`
+  - What it does: overlays hatch lines at 0, 45, and 90 degrees together instead of a single angle pass.
+  - Cutting impact: increases coverage evenness for large fill areas (e.g. mask clearing) at the cost of roughly 3x the segment count and processing time.
+
 #### Contour Offset Mode Settings
 
 - `Contour start offset (mm)`
@@ -233,7 +278,22 @@ These settings exist in the KiCad plugin dialog. The cutting impact notes descri
   - What it does: automatically flips the offset direction for contours nested inside another selected contour (odd containment depth = hole), so isolation-routing offsets alternate outward/inward without manually flipping each nested contour. Enabled by default.
   - Cutting impact: keeps hole-like nested features processed inward while outer contours still expand outward, avoiding accidental overlap or gaps between nested loops.
 
-#### Drill Spiral Mode Settings
+- Overlap prevention between nearby features (always on, not a toggle)
+  - What it does: when two separate selected zones (e.g. two close pads) are near enough that their offset loops would start to cross or overlap, contour generation automatically stops growing both of them from that point onward, similar to how 3D-printing slicers stop adding perimeter shells once they would collide with a neighboring feature.
+  - Cutting impact: prevents the laser from re-cutting the same narrow gap on more than one pass (overcutting/overheating small details like closely spaced pads).
+
+#### Drill Mode Settings
+
+- `Drill style`
+  - `contour` (default): each hole gets regular concentric inward contour loops, matching the isolation-routing look of `contour_offsets` mode.
+  - `spiral`: each hole gets an outer contour at drill diameter plus inward spiral arms.
+  - Cutting impact: contour style gives more even, predictable coverage near the hole edge; spiral style covers the hole interior with fewer total passes.
+
+- `Drill contour start offset (mm)` / `Drill contour spacing (mm)` / `Drill contour count (perimeters)`
+  - What they do: control the first inward offset, spacing between loops, and number of loops for `Drill style: contour` (defaults: 0.05mm start, 0.05mm spacing, 4 perimeters).
+  - Cutting impact: more/tighter loops increase dwell time and heat inside small holes.
+
+#### Drill Spiral Style Settings (`Drill style: spiral`)
 
 - `Drill spiral turns`
   - What it does: controls how many turns each inward spiral arm performs from hole edge toward center.
@@ -265,6 +325,24 @@ Behavior in this mode:
 - The tool picks the single largest contour.
 - Inner contours are ignored.
 - Drill-hole islands are ignored for contour choice.
+
+### Export All Layers
+
+The **Export All Layers...** button exports F.Cu, B.Cu, Edge.Cuts, F.Mask, B.Mask (whichever are present on the board), and drill holes to separate DXF files in one folder — the target machine cannot cut several layers combined into a single file. It also writes a `<board-stem>_export_all_config.json` file describing exactly what was exported per layer, which can be reused headlessly with the AppImage's `--export-all` flag (see above).
+
+Each layer uses its own saved settings from the dialog if you have previously configured that layer, otherwise these defaults are applied:
+
+- `F.Cu` / `B.Cu`: `contour_offsets` mode (isolation routing).
+- `Edge.Cuts`: `hatch` mode with `Outer zone only` enabled (board-outline cleanup).
+- `F.Mask` / `B.Mask`: `hatch` mode, all zones selected (clears solder-mask paint from the exposed copper openings).
+- Drill holes: the `Drill style` default (`contour`).
+
+### Preview Canvas Controls
+
+- Scroll the mouse wheel to zoom in/out, centered on the cursor position.
+- Left-click and drag to pan.
+- Double-click or middle-click to reset the view to fit the current geometry.
+- Changing the selected layer resets the view; adjusting parameters on the same layer keeps your current pan/zoom.
 
 ## Repository Layout
 
