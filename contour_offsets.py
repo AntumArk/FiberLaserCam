@@ -229,32 +229,43 @@ def _bboxes_overlap(
 def _candidate_overlap_pairs(
     bboxes: list[tuple[float, float, float, float] | None],
 ) -> list[tuple[int, int]]:
-    """Broad-phase spatial filter: bucket rings into a grid so only rings whose
-    bounding boxes could plausibly overlap are checked with the expensive
+    """Broad-phase spatial filter: sweep rings along the x-axis so only rings
+    whose bounding boxes could plausibly overlap are checked with the expensive
     per-segment `_rings_overlap` test below. This avoids an O(n^2) full-geometry
     scan when many rings (e.g. pads scattered across a large board) are far apart.
+
+    A fixed-size spatial grid was used here previously, with cell size derived
+    from the single largest ring extent. That falls apart as soon as any one
+    ring is much larger/longer than the rest (e.g. a trace running most of the
+    length of the board next to many small pads): the oversized cell swallows
+    the whole board into one bucket and degrades to a full O(n^2) scan. The
+    sweep below instead tracks which bounding boxes are "active" (their x-range
+    contains the current sweep position) and only compares pairs that are
+    simultaneously active, so its cost tracks actual spatial proximity
+    regardless of how differently sized the rings are.
     """
     present = [(i, b) for i, b in enumerate(bboxes) if b is not None]
     if len(present) < 2:
         return []
 
-    max_extent = max(max(b[2] - b[0], b[3] - b[1]) for _, b in present)
-    cell = max_extent if max_extent > 1e-9 else 1.0
+    events: list[tuple[float, int, int]] = []
+    for i, (minx, _miny, maxx, _maxy) in present:
+        events.append((minx, 0, i))  # 0 = start, sorts before end at same x
+        events.append((maxx, 1, i))  # 1 = end
+    events.sort(key=lambda e: (e[0], e[1]))
 
-    buckets: dict[tuple[int, int], list[int]] = {}
-    for i, (minx, miny, maxx, maxy) in present:
-        cx0, cy0 = int(math.floor(minx / cell)), int(math.floor(miny / cell))
-        cx1, cy1 = int(math.floor(maxx / cell)), int(math.floor(maxy / cell))
-        for cx in range(cx0, cx1 + 1):
-            for cy in range(cy0, cy1 + 1):
-                buckets.setdefault((cx, cy), []).append(i)
-
+    active: dict[int, tuple[float, float, float, float]] = {}
     pairs: set[tuple[int, int]] = set()
-    for members in buckets.values():
-        for a_idx in range(len(members)):
-            for b_idx in range(a_idx + 1, len(members)):
-                i, j = members[a_idx], members[b_idx]
+    for _, kind, i in events:
+        if kind == 0:
+            bi = bboxes[i]
+            for j, bj in active.items():
+                if bi[3] < bj[1] or bj[3] < bi[1]:
+                    continue
                 pairs.add((i, j) if i < j else (j, i))
+            active[i] = bi
+        else:
+            active.pop(i, None)
 
     return sorted(pairs)
 
@@ -280,6 +291,59 @@ def _rings_overlap(ring_a: list[tuple[float, float]], ring_b: list[tuple[float, 
     return _point_in_ring(ring_a[0], ring_b) or _point_in_ring(ring_b[0], ring_a)
 
 
+def _rings_touch_or_overlap(
+    ring_a: list[tuple[float, float]], ring_b: list[tuple[float, float]], tol: float = 1e-4
+) -> bool:
+    """Return True if two closed rings touch (share an edge/vertex) or overlap.
+
+    `_rings_overlap` treats a perfectly touching boundary (shared edge, no
+    crossing) as *not* overlapping. Copper features belonging to the same net
+    (e.g. a pad and the track soldered to it) are exported as separate closed
+    rings even though they are physically one contiguous blob of copper, so
+    they typically touch exactly rather than cross. Nudging one ring outward
+    by a tiny tolerance first turns that touching contact into a detectable
+    overlap.
+    """
+    if _rings_overlap(ring_a, ring_b):
+        return True
+    nudged = _offset_ring(ring_a, tol) or ring_a
+    return _rings_overlap(nudged, ring_b)
+
+
+def _touching_groups(
+    rings: list[list[tuple[float, float]] | None], tol: float = 1e-4
+) -> list[int]:
+    """Group rings that touch or overlap each other (at their original,
+    un-offset position) into connected components, returned as one
+    representative index per ring.
+
+    Rings sharing a component are treated as the same physical copper island
+    (e.g. a pad and the track connected to it) and must not be flagged as
+    "colliding" with each other while growing isolation-routing offsets —
+    only genuinely separate islands should stop each other's growth.
+    """
+    n = len(rings)
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    bboxes = [_ring_bbox(r) if r else None for r in rings]
+    for i, j in _candidate_overlap_pairs(bboxes):
+        if rings[i] and rings[j] and _rings_touch_or_overlap(rings[i], rings[j], tol):
+            union(i, j)
+
+    return [find(i) for i in range(n)]
+
+
 def generate_contour_offset_loops_multi(
     polys: list,
     start_offset: float,
@@ -298,11 +362,20 @@ def generate_contour_offset_loops_multi(
     feature: once a pair of polygons' loops overlap at a given offset step,
     growth is stopped for both of them from that step onward, while the
     earlier non-overlapping loops already generated are kept.
+
+    Polygons that already touch or overlap at their original (un-offset)
+    position (e.g. a pad and the trace soldered to it, both part of the same
+    net) are exempted from colliding with each other: they are physically one
+    contiguous piece of copper, so their offset loops are expected to overlap
+    near the shared seam, and stopping their growth there would wrongly
+    delete the isolation routing around the whole feature.
     """
     n_polys = len(polys)
     rings = [_to_ring(p) for p in polys]
     if invert_flags is None:
         invert_flags = [False] * n_polys
+
+    same_island = _touching_groups(rings)
 
     active = [bool(r) for r in rings]
     result: list[list[list[tuple[float, float]]]] = [[] for _ in range(n_polys)]
@@ -328,6 +401,8 @@ def generate_contour_offset_loops_multi(
             _ring_bbox(r) if r is not None else None for r in step_rings
         ]
         for i, j in _candidate_overlap_pairs(bboxes):
+            if same_island[i] == same_island[j]:
+                continue
             if _rings_overlap(step_rings[i], step_rings[j]):
                 collided.add(i)
                 collided.add(j)
