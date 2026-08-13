@@ -118,6 +118,8 @@ Short options: `-s` start offset, `-i` spacing (both in microns), `-n` repetitio
 
 For text-style geometry, enable `--alternate-nesting` to hatch by contour nesting depth: depth 0 hatched, depth 1 skipped, depth 2 hatched, and so on.
 
+In contour mode, nested contours (holes) automatically use the opposite offset direction from their enclosing contour, based on containment nesting depth, so isolation-routing passes alternate outward/inward without manually flipping each nested contour. Pass `--no-auto-alternate` to disable this and apply `--invert` uniformly to every contour instead.
+
 Use `--mode drill` to generate a separate drill DXF from KiCad board/project input. Each drill hole gets an outer contour at drill diameter plus 3 inward spirals offset by 120 degrees. Tune spiral density with `--spiral-turns` and `--spiral-inner-ratio`.
 
 
@@ -226,6 +228,10 @@ These settings exist in the KiCad plugin dialog. The cutting impact notes descri
   - What it does: flips contour offset direction from expansion to contraction.
   - Cutting impact: useful for processing hole-like features where offsets should move inward from boundary.
   - Drill-hole use: enable this when you want offset passes to tighten toward hole centers instead of growing outward.
+
+- `Auto-alternate direction for nested contours (holes)`
+  - What it does: automatically flips the offset direction for contours nested inside another selected contour (odd containment depth = hole), so isolation-routing offsets alternate outward/inward without manually flipping each nested contour. Enabled by default.
+  - Cutting impact: keeps hole-like nested features processed inward while outer contours still expand outward, avoiding accidental overlap or gaps between nested loops.
 
 #### Drill Spiral Mode Settings
 
