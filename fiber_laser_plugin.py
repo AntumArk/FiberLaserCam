@@ -55,6 +55,7 @@ DEFAULT_LAYER_SETTINGS: dict[str, object] = {
     "drillContourStart": 0.05,
     "drillContourSpacing": 0.05,
     "drillContourCount": 4,
+    "usePcbnewGeometry": False,
 }
 
 
@@ -138,6 +139,7 @@ def _sanitize_layer_settings(raw: dict[str, object] | None) -> dict[str, object]
         "drillContourStart": _coerce_float(merged.get("drillContourStart"), float(DEFAULT_LAYER_SETTINGS["drillContourStart"])),
         "drillContourSpacing": _coerce_float(merged.get("drillContourSpacing"), float(DEFAULT_LAYER_SETTINGS["drillContourSpacing"])),
         "drillContourCount": max(1, _coerce_int(merged.get("drillContourCount"), int(DEFAULT_LAYER_SETTINGS["drillContourCount"]))),
+        "usePcbnewGeometry": _coerce_bool(merged.get("usePcbnewGeometry"), bool(DEFAULT_LAYER_SETTINGS["usePcbnewGeometry"])),
     }
     return clean
 
@@ -264,6 +266,37 @@ def _run_kicad_dxf_export(kicad_cli: str, board_path: Path, output_path: Path, l
     if completed.returncode != 0:
         details = completed.stderr.strip() or completed.stdout.strip() or "Unknown export failure."
         raise RuntimeError(details)
+
+
+def _export_kicad_layer_via_pcbnew(layer: str, output_path: Path) -> None:
+    """pcbnew-native counterpart to _run_kicad_dxf_export: writes a DXF of one
+    copper layer's net-merged polygons directly from the live board (no
+    kicad-cli subprocess). Same-net pads/tracks/zones are merged with KiCad's
+    own SHAPE_POLY_SET.Simplify(), so touching same-net features never
+    produce separate/overlapping polygons the way a raw kicad-cli DXF export
+    can. Downstream zone-selection, offsetting, and hatching are unchanged --
+    only the shape of the exported polygons differs from the DXF path."""
+    import pcbnew_geometry
+
+    board = pcbnew.GetBoard()
+    layer_id = pcbnew_geometry.resolve_layer_id(board, layer)
+    net_polys = pcbnew_geometry.build_net_polygons_for_layer(board, layer_id)
+
+    doc = ezdxf.new("R2000")
+    doc.header["$INSUNITS"] = 4
+    if layer not in doc.layers:
+        doc.layers.new(layer, dxfattribs={"color": 1})
+
+    msp = doc.modelspace()
+    for polyset in net_polys.values():
+        for ring in pcbnew_geometry.polyset_to_rings(polyset):
+            if len(ring) < 3:
+                continue
+            closed = list(ring) + [ring[0]]
+            msp.add_lwpolyline(closed, close=False, dxfattribs={"layer": layer})
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.saveas(str(output_path))
 
 
 class PreviewCanvas(wx.Panel):
@@ -476,9 +509,13 @@ def _export_all_target_layers(layer_choices: list[str]) -> list[str]:
 
 
 def _build_session_for_kicad_layer(
-    kicad_cli: str, board_path: Path, layer: str
+    kicad_cli: str, board_path: Path, layer: str, use_pcbnew: bool = False
 ) -> tuple[UploadSession, list[str], Path]:
     """Export a single KiCad layer to a temp DXF and build a session + zone id list from it.
+
+    When ``use_pcbnew`` is True, the layer is exported via the pcbnew-native
+    path (_export_kicad_layer_via_pcbnew, no kicad-cli subprocess, net-merged
+    polygons) instead of kicad-cli.
 
     The caller is responsible for deleting the returned temp DXF path once done with it.
     On failure, this function cleans up the temp DXF itself before re-raising, since the
@@ -487,7 +524,10 @@ def _build_session_for_kicad_layer(
     TEMP_DXF_DIR.mkdir(parents=True, exist_ok=True)
     raw_output_path = TEMP_DXF_DIR / f"{board_path.stem}-fiber-export-{uuid.uuid4().hex}.dxf"
     try:
-        _run_kicad_dxf_export(kicad_cli, board_path, raw_output_path, layer)
+        if use_pcbnew:
+            _export_kicad_layer_via_pcbnew(layer, raw_output_path)
+        else:
+            _run_kicad_dxf_export(kicad_cli, board_path, raw_output_path, layer)
         session, zones = _build_local_session_from_dxf(raw_output_path)
     except Exception:
         if raw_output_path.exists():
@@ -771,6 +811,9 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.alternate_nesting_hatch_ctrl = wx.CheckBox(panel, label="Alternate nested contours (text mode)")
         self.invert_alternate_nesting_ctrl = wx.CheckBox(panel, label="Invert alternation (flip which nesting depth is hatched)")
         self.multi_angle_hatch_ctrl = wx.CheckBox(panel, label="Multi-angle hatch (overlay 0/45/90 deg)")
+        self.use_pcbnew_geometry_ctrl = wx.CheckBox(
+            panel, label="Use pcbnew-native geometry (experimental, merges touching same-net copper)"
+        )
 
         def add_row(label: str, control: wx.Window):
             grid.Add(wx.StaticText(panel, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -798,6 +841,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         add_row("Nested text hatching", self.alternate_nesting_hatch_ctrl)
         add_row("Invert nested hatching", self.invert_alternate_nesting_ctrl)
         add_row("Multi-angle hatch", self.multi_angle_hatch_ctrl)
+        add_row("Geometry source", self.use_pcbnew_geometry_ctrl)
 
         left.Add(grid, 0, wx.ALL | wx.EXPAND, 10)
 
@@ -850,6 +894,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.alternate_nesting_hatch_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
         self.invert_alternate_nesting_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
         self.multi_angle_hatch_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
+        self.use_pcbnew_geometry_ctrl.Bind(wx.EVT_CHECKBOX, self._on_geometry_source_changed)
         self.hatch_all_ctrl.Bind(wx.EVT_CHECKBOX, self._on_hatch_all)
         self.zone_list.Bind(wx.EVT_CHECKLISTBOX, self._on_zone_checked)
         for ctrl in (
@@ -911,6 +956,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             self.alternate_nesting_hatch_ctrl.SetValue(bool(s["alternateNestingHatch"]))
             self.invert_alternate_nesting_ctrl.SetValue(bool(s["invertAlternateNesting"]))
             self.multi_angle_hatch_ctrl.SetValue(bool(s["multiAngleHatch"]))
+            self.use_pcbnew_geometry_ctrl.SetValue(bool(s["usePcbnewGeometry"]))
         finally:
             self._suspend_events = False
 
@@ -974,6 +1020,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             "alternateNestingHatch": self.alternate_nesting_hatch_ctrl.GetValue(),
             "invertAlternateNesting": self.invert_alternate_nesting_ctrl.GetValue(),
             "multiAngleHatch": self.multi_angle_hatch_ctrl.GetValue(),
+            "usePcbnewGeometry": self.use_pcbnew_geometry_ctrl.GetValue(),
         }
         return _sanitize_layer_settings(settings), None
 
@@ -1010,6 +1057,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             and self.alternate_nesting_hatch_ctrl.GetValue()
         )
         self.multi_angle_hatch_ctrl.Enable((not is_contour) and (not is_drill))
+        self.use_pcbnew_geometry_ctrl.Enable(not is_drill)
         self.zone_list.Enable(not is_drill)
         self.hatch_all_ctrl.Enable(not is_drill)
 
@@ -1049,10 +1097,14 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
 
         TEMP_DXF_DIR.mkdir(parents=True, exist_ok=True)
         raw_output_path = TEMP_DXF_DIR / f"{self.board_path.stem}-fiber-export-{uuid.uuid4().hex}.dxf"
+        use_pcbnew = bool(settings.get("usePcbnewGeometry", False))
         try:
-            _run_kicad_dxf_export(self.kicad_cli, self.board_path, raw_output_path, layer)
-        except RuntimeError as exc:
-            self.status_lbl.SetLabel(f"DXF export failed: {exc}")
+            if use_pcbnew:
+                _export_kicad_layer_via_pcbnew(layer, raw_output_path)
+            else:
+                _run_kicad_dxf_export(self.kicad_cli, self.board_path, raw_output_path, layer)
+        except Exception as exc:
+            self.status_lbl.SetLabel(f"{'pcbnew' if use_pcbnew else 'DXF'} export failed: {exc}")
             self.session = None
             self.zone_map = {}
             self.zone_order = []
@@ -1110,6 +1162,18 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             return
         self._refresh_mode_control_states()
         self._refresh_preview()
+
+    def _on_geometry_source_changed(self, _event) -> None:
+        if self._suspend_events:
+            return
+        # Switching geometry source changes which polygons are exported for
+        # this layer (net-merged pcbnew data vs. kicad-cli DXF), so the layer
+        # needs a full reload, not just a preview refresh. Persist first so
+        # _load_layer (which reads settings back from storage) picks up the
+        # new checkbox value instead of the previously-saved one.
+        self._refresh_mode_control_states()
+        self._persist_current_settings()
+        self._load_layer(self._current_layer())
 
     def _on_hatch_all(self, _event) -> None:
         if self._suspend_events:
@@ -1285,7 +1349,8 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             raw_path: Path | None = None
             try:
                 session, zone_ids, raw_path = _build_session_for_kicad_layer(
-                    self.kicad_cli, self.board_path, layer
+                    self.kicad_cli, self.board_path, layer,
+                    use_pcbnew=bool(settings.get("usePcbnewGeometry", False)),
                 )
                 payload = _payload_from_settings(settings, board_path=self.board_path, selected_ids=zone_ids)
                 dxf_bytes = _generate_export_dxf_bytes(session, payload)

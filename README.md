@@ -233,6 +233,11 @@ These settings exist in the KiCad plugin dialog. The cutting impact notes descri
   - `drill`: generates drill-hole geometry from KiCad drill data, using the chosen `Drill style`.
   - Cutting impact: hatch usually deposits more heat over area; contour offsets may reduce fill density but can still overheat if spacing is tight.
 
+- `Geometry source` (checkbox: "Use pcbnew-native geometry")
+  - Unchecked (default): exports the layer via `kicad-cli` to DXF, then parses it (the original path).
+  - Checked: builds the layer's polygons directly from the live board (pads/tracks/zones), merging same-net touching features with KiCad's own `SHAPE_POLY_SET.Simplify()` instead of relying on DXF geometry alone. See [pcbnew-Native Geometry Source](#pcbnew-native-geometry-source-contour-mode) below. Has no effect in `drill` mode, which always reads board data directly.
+  - Cutting impact: none by itself (same downstream hatch/contour generation); primarily fixes missing/incorrectly-split traces where same-net copper touches at a seam, and avoids a `kicad-cli` subprocess call per layer.
+
 #### Hatch Mode Settings
 
 - `Hatch angle (deg)`
