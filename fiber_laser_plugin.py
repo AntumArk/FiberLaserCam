@@ -14,7 +14,7 @@ import pcbnew
 import wx
 
 import minidxf as ezdxf
-from offline_export import build_kicad_drill_spiral_geometry
+from offline_export import build_kicad_drill_geometry, DEFAULT_DRILL_STYLE, DRILL_STYLES
 from app_geometry import (
     DEFAULT_MIN_HATCH_AREA,
     build_contour_loops_for_selection,
@@ -47,17 +47,30 @@ DEFAULT_LAYER_SETTINGS: dict[str, object] = {
     "hatchAll": True,
     "outerZoneOnly": False,
     "alternateNestingHatch": False,
+    "invertAlternateNesting": False,
+    "multiAngleHatch": False,
     "spiralTurns": 1.75,
     "spiralInnerRatio": 0.10,
+    "drillStyle": DEFAULT_DRILL_STYLE,
+    "drillContourStart": 0.05,
+    "drillContourSpacing": 0.05,
+    "drillContourCount": 4,
 }
 
 
 def _default_layer_settings_for(layer_name: str) -> dict[str, object]:
     base = dict(DEFAULT_LAYER_SETTINGS)
-    if layer_name.strip().lower() == "edge.cuts":
+    normalized = layer_name.strip().lower()
+    if normalized == "edge.cuts":
         base["mode"] = "hatch"
         base["hatchAll"] = True
         base["outerZoneOnly"] = True
+    elif normalized in {"f.mask", "b.mask"}:
+        # Solder mask layers are exported as hatch fill (not isolation contours)
+        # so the laser clears the paint/mask coating inside the openings.
+        base["mode"] = "hatch"
+        base["hatchAll"] = True
+        base["outerZoneOnly"] = False
     return _sanitize_layer_settings(base)
 
 
@@ -93,8 +106,12 @@ def _sanitize_layer_settings(raw: dict[str, object] | None) -> dict[str, object]
         merged.update(raw)
 
     mode = str(merged.get("mode", DEFAULT_LAYER_SETTINGS["mode"]))
-    if mode not in {"hatch", "contour_offsets", "drill_spirals"}:
+    if mode not in {"hatch", "contour_offsets", "drill"}:
         mode = str(DEFAULT_LAYER_SETTINGS["mode"])
+
+    drill_style = str(merged.get("drillStyle", DEFAULT_LAYER_SETTINGS["drillStyle"]))
+    if drill_style not in DRILL_STYLES:
+        drill_style = str(DEFAULT_LAYER_SETTINGS["drillStyle"])
 
     clean: dict[str, object] = {
         "mode": mode,
@@ -113,8 +130,14 @@ def _sanitize_layer_settings(raw: dict[str, object] | None) -> dict[str, object]
         "hatchAll": _coerce_bool(merged.get("hatchAll"), bool(DEFAULT_LAYER_SETTINGS["hatchAll"])),
         "outerZoneOnly": _coerce_bool(merged.get("outerZoneOnly"), bool(DEFAULT_LAYER_SETTINGS["outerZoneOnly"])),
         "alternateNestingHatch": _coerce_bool(merged.get("alternateNestingHatch"), bool(DEFAULT_LAYER_SETTINGS["alternateNestingHatch"])),
+        "invertAlternateNesting": _coerce_bool(merged.get("invertAlternateNesting"), bool(DEFAULT_LAYER_SETTINGS["invertAlternateNesting"])),
+        "multiAngleHatch": _coerce_bool(merged.get("multiAngleHatch"), bool(DEFAULT_LAYER_SETTINGS["multiAngleHatch"])),
         "spiralTurns": _coerce_float(merged.get("spiralTurns"), float(DEFAULT_LAYER_SETTINGS["spiralTurns"])),
         "spiralInnerRatio": _coerce_float(merged.get("spiralInnerRatio"), float(DEFAULT_LAYER_SETTINGS["spiralInnerRatio"])),
+        "drillStyle": drill_style,
+        "drillContourStart": _coerce_float(merged.get("drillContourStart"), float(DEFAULT_LAYER_SETTINGS["drillContourStart"])),
+        "drillContourSpacing": _coerce_float(merged.get("drillContourSpacing"), float(DEFAULT_LAYER_SETTINGS["drillContourSpacing"])),
+        "drillContourCount": max(1, _coerce_int(merged.get("drillContourCount"), int(DEFAULT_LAYER_SETTINGS["drillContourCount"]))),
     }
     return clean
 
@@ -244,19 +267,46 @@ def _run_kicad_dxf_export(kicad_cli: str, board_path: Path, output_path: Path, l
 
 
 class PreviewCanvas(wx.Panel):
+    #: Zoom multiplier applied per mouse-wheel notch.
+    ZOOM_STEP = 1.15
+    MIN_ZOOM = 0.05
+    MAX_ZOOM = 200.0
+
     def __init__(self, parent):
         super().__init__(parent, style=wx.BORDER_SIMPLE)
         self.zones: dict[str, list[list[float]]] = {}
         self.selected: set[str] = set()
         self.segments: list[list[list[float]]] = []
+        self._zoom = 1.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self._dragging = False
+        self._drag_last: tuple[int, int] | None = None
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
         self.Bind(wx.EVT_PAINT, self._on_paint)
+        self.Bind(wx.EVT_MOUSEWHEEL, self._on_mouse_wheel)
+        self.Bind(wx.EVT_LEFT_DOWN, self._on_left_down)
+        self.Bind(wx.EVT_LEFT_UP, self._on_left_up)
+        self.Bind(wx.EVT_MOTION, self._on_motion)
+        self.Bind(wx.EVT_MOUSE_CAPTURE_LOST, self._on_capture_lost)
+        self.Bind(wx.EVT_MIDDLE_DOWN, self._on_reset_view)
+        self.Bind(wx.EVT_LEFT_DCLICK, self._on_reset_view)
 
     def set_data(self, zones: dict[str, list[list[float]]], selected: set[str], segments: list[list[list[float]]]) -> None:
         self.zones = zones
         self.selected = selected
         self.segments = segments
         self.Refresh(False)
+
+    def reset_view(self) -> None:
+        """Reset zoom/pan back to the auto-fit view. Call this on layer changes."""
+        self._zoom = 1.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self.Refresh(False)
+
+    def _on_reset_view(self, _event) -> None:
+        self.reset_view()
 
     def _collect_bounds(self) -> tuple[float, float, float, float] | None:
         xs: list[float] = []
@@ -273,29 +323,112 @@ class PreviewCanvas(wx.Panel):
             return None
         return (min(xs), min(ys), max(xs), max(ys))
 
-    def _on_paint(self, _event) -> None:
-        dc = wx.AutoBufferedPaintDC(self)
-        dc.Clear()
-
+    def _base_transform(self) -> tuple[float, float, float, float, float] | None:
+        """Compute the auto-fit (minx, miny, scale, width, height) for current bounds/size."""
         bounds = self._collect_bounds()
         if bounds is None:
-            return
-
+            return None
         minx, miny, maxx, maxy = bounds
         width, height = self.GetClientSize()
         if width <= 2 or height <= 2:
-            return
+            return None
 
         span_x = max(maxx - minx, 1e-6)
         span_y = max(maxy - miny, 1e-6)
         margin = 16.0
-        scale = min((width - 2 * margin) / span_x, (height - 2 * margin) / span_y)
+        base_scale = min((width - 2 * margin) / span_x, (height - 2 * margin) / span_y)
+        return (minx, miny, base_scale, width, height)
+
+    def _world_to_screen(self, x: float, y: float) -> tuple[float, float] | None:
+        transform = self._base_transform()
+        if transform is None:
+            return None
+        minx, miny, base_scale, width, height = transform
+        margin = 16.0
+        scale = base_scale * self._zoom
+        sx = margin + self._pan_x + ((x - minx) * scale)
+        sy = height - (margin + self._pan_y + ((y - miny) * scale))
+        return (sx, sy)
+
+    def _screen_to_world(self, sx: float, sy: float) -> tuple[float, float] | None:
+        transform = self._base_transform()
+        if transform is None:
+            return None
+        minx, miny, base_scale, width, height = transform
+        margin = 16.0
+        scale = base_scale * self._zoom
+        if scale <= 1e-12:
+            return None
+        x = minx + ((sx - margin - self._pan_x) / scale)
+        y = miny + ((height - sy - margin - self._pan_y) / scale)
+        return (x, y)
+
+    def _on_mouse_wheel(self, event: "wx.MouseEvent") -> None:
+        rotation = event.GetWheelRotation()
+        if rotation == 0:
+            return
+
+        mouse_pos = event.GetPosition()
+        world_before = self._screen_to_world(float(mouse_pos.x), float(mouse_pos.y))
+
+        factor = self.ZOOM_STEP if rotation > 0 else (1.0 / self.ZOOM_STEP)
+        new_zoom = min(self.MAX_ZOOM, max(self.MIN_ZOOM, self._zoom * factor))
+        if new_zoom == self._zoom:
+            return
+        self._zoom = new_zoom
+
+        if world_before is not None:
+            # Keep the point under the cursor stationary on screen after zooming.
+            screen_after = self._world_to_screen(world_before[0], world_before[1])
+            if screen_after is not None:
+                self._pan_x += float(mouse_pos.x) - screen_after[0]
+                self._pan_y -= float(mouse_pos.y) - screen_after[1]
+
+        self.Refresh(False)
+
+    def _on_left_down(self, event: "wx.MouseEvent") -> None:
+        self._dragging = True
+        self._drag_last = (event.GetPosition().x, event.GetPosition().y)
+        if not self.HasCapture():
+            self.CaptureMouse()
+
+    def _on_left_up(self, _event) -> None:
+        self._dragging = False
+        self._drag_last = None
+        if self.HasCapture():
+            self.ReleaseMouse()
+
+    def _on_capture_lost(self, _event) -> None:
+        self._dragging = False
+        self._drag_last = None
+
+    def _on_motion(self, event: "wx.MouseEvent") -> None:
+        if not self._dragging or self._drag_last is None or not event.Dragging() or not event.LeftIsDown():
+            return
+        pos = event.GetPosition()
+        dx = pos.x - self._drag_last[0]
+        dy = pos.y - self._drag_last[1]
+        self._drag_last = (pos.x, pos.y)
+        self._pan_x += dx
+        self._pan_y -= dy
+        self.Refresh(False)
+
+    def _on_paint(self, _event) -> None:
+        dc = wx.AutoBufferedPaintDC(self)
+        dc.Clear()
+
+        transform = self._base_transform()
+        if transform is None:
+            return
+        minx, miny, base_scale, width, height = transform
+        scale = base_scale * self._zoom
+        margin = 16.0
 
         def sx(x: float) -> int:
-            return int(margin + ((x - minx) * scale))
+            return int(margin + self._pan_x + ((x - minx) * scale))
 
         def sy(y: float) -> int:
-            return int(height - (margin + ((y - miny) * scale)))
+            return int(height - (margin + self._pan_y + ((y - miny) * scale)))
 
         zone_pen = wx.Pen(wx.Colour(90, 90, 90), 1)
         selected_pen = wx.Pen(wx.Colour(0, 140, 220), 2)
@@ -331,6 +464,71 @@ def _build_local_session_from_dxf(raw_output_path: Path) -> tuple[UploadSession,
     return session, zones
 
 
+# Standard KiCad layers considered by the "Export All" button, in export order.
+EXPORT_ALL_LAYER_ORDER = ["F.Cu", "B.Cu", "Edge.Cuts", "F.Mask", "B.Mask"]
+EXPORT_ALL_DRILL_LAYER = "Drill"
+
+
+def _export_all_target_layers(layer_choices: list[str]) -> list[str]:
+    """Pick the subset of EXPORT_ALL_LAYER_ORDER actually present on the board."""
+    lower_map = {lc.lower(): lc for lc in layer_choices}
+    return [lower_map[name.lower()] for name in EXPORT_ALL_LAYER_ORDER if name.lower() in lower_map]
+
+
+def _build_session_for_kicad_layer(
+    kicad_cli: str, board_path: Path, layer: str
+) -> tuple[UploadSession, list[str], Path]:
+    """Export a single KiCad layer to a temp DXF and build a session + zone id list from it.
+
+    The caller is responsible for deleting the returned temp DXF path once done with it.
+    On failure, this function cleans up the temp DXF itself before re-raising, since the
+    caller never receives a path to clean up in that case.
+    """
+    TEMP_DXF_DIR.mkdir(parents=True, exist_ok=True)
+    raw_output_path = TEMP_DXF_DIR / f"{board_path.stem}-fiber-export-{uuid.uuid4().hex}.dxf"
+    try:
+        _run_kicad_dxf_export(kicad_cli, board_path, raw_output_path, layer)
+        session, zones = _build_local_session_from_dxf(raw_output_path)
+    except Exception:
+        if raw_output_path.exists():
+            try:
+                raw_output_path.unlink()
+            except Exception:
+                pass
+        raise
+    zone_ids = [str(z.get("id", "")).strip() for z in zones if str(z.get("id", "")).strip()]
+    return session, zone_ids, raw_output_path
+
+
+def _payload_from_settings(settings: dict[str, object], *, board_path: Path, selected_ids: list[str]) -> dict[str, object]:
+    """Build a preview/export payload dict from a sanitized layer settings dict."""
+    return {
+        "selectedIds": selected_ids,
+        "boardPath": str(board_path),
+        "mode": settings["mode"],
+        "angle": settings["angle"],
+        "spacing": settings["spacing"],
+        "useManualSpacing": settings["useManualSpacing"],
+        "laserRadius": settings["laserRadius"],
+        "minArea": settings["minArea"],
+        "drillStyle": settings["drillStyle"],
+        "drillContourStart": settings["drillContourStart"],
+        "drillContourSpacing": settings["drillContourSpacing"],
+        "drillContourCount": settings["drillContourCount"],
+        "spiralTurns": settings["spiralTurns"],
+        "spiralInnerRatio": settings["spiralInnerRatio"],
+        "outerZoneOnly": settings["outerZoneOnly"],
+        "alternateNestingHatch": settings["alternateNestingHatch"],
+        "invertAlternateNesting": settings["invertAlternateNesting"],
+        "multiAngleHatch": settings["multiAngleHatch"],
+        "offsetStart": settings["offsetStart"],
+        "offsetSpacing": settings["offsetSpacing"],
+        "offsetCount": settings["offsetCount"],
+        "invertOffsetDirection": settings["invertOffsetDirection"],
+        "autoAlternateContourDirection": settings["autoAlternateContourDirection"],
+    }
+
+
 def _generate_preview_segments(
     session: UploadSession,
     payload: dict[str, object],
@@ -340,15 +538,23 @@ def _generate_preview_segments(
     selected_ids = payload.get("selectedIds") or []
     mode = str(payload.get("mode", "hatch"))
 
-    if mode == "drill_spirals":
+    if mode == "drill":
         board_path_raw = payload.get("boardPath", "")
         board_path = Path(str(board_path_raw))
+        drill_style = str(payload.get("drillStyle", DEFAULT_DRILL_STYLE))
         spiral_turns = float(payload.get("spiralTurns", 1.75))
         spiral_inner_ratio = float(payload.get("spiralInnerRatio", 0.10))
-        _, segments = build_kicad_drill_spiral_geometry(
+        contour_start = float(payload.get("drillContourStart", 0.05))
+        contour_spacing = float(payload.get("drillContourSpacing", 0.05))
+        contour_count = int(payload.get("drillContourCount", 4))
+        _, segments = build_kicad_drill_geometry(
             board_path,
+            style=drill_style,
             spiral_turns=spiral_turns,
             spiral_inner_ratio=spiral_inner_ratio,
+            contour_start_offset=contour_start,
+            contour_spacing=contour_spacing,
+            contour_count=contour_count,
         )
         return segments
 
@@ -381,6 +587,8 @@ def _generate_preview_segments(
 
     outer_zone_only = bool(payload.get("outerZoneOnly", False))
     alternate_nesting_hatch = bool(payload.get("alternateNestingHatch", False))
+    invert_alternate_nesting = bool(payload.get("invertAlternateNesting", False))
+    multi_angle_hatch = bool(payload.get("multiAngleHatch", False))
     if outer_only_override is not None:
         outer_zone_only = bool(outer_only_override)
     if outer_zone_only:
@@ -395,6 +603,8 @@ def _generate_preview_segments(
         min_area,
         outer_zone_only,
         alternate_nesting_hatch,
+        invert_alternate_nesting,
+        multi_angle_hatch,
     )
     return segments
 
@@ -408,15 +618,23 @@ def _generate_export_dxf_bytes(
     selected_ids = payload.get("selectedIds") or []
     mode = str(payload.get("mode", "hatch"))
 
-    if mode == "drill_spirals":
+    if mode == "drill":
         board_path_raw = payload.get("boardPath", "")
         board_path = Path(str(board_path_raw))
+        drill_style = str(payload.get("drillStyle", DEFAULT_DRILL_STYLE))
         spiral_turns = float(payload.get("spiralTurns", 1.75))
         spiral_inner_ratio = float(payload.get("spiralInnerRatio", 0.10))
-        circles, segments = build_kicad_drill_spiral_geometry(
+        contour_start = float(payload.get("drillContourStart", 0.05))
+        contour_spacing = float(payload.get("drillContourSpacing", 0.05))
+        contour_count = int(payload.get("drillContourCount", 4))
+        circles, segments = build_kicad_drill_geometry(
             board_path,
+            style=drill_style,
             spiral_turns=spiral_turns,
             spiral_inner_ratio=spiral_inner_ratio,
+            contour_start_offset=contour_start,
+            contour_spacing=contour_spacing,
+            contour_count=contour_count,
         )
 
         doc = ezdxf.new("R2000")
@@ -519,20 +737,29 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self._all_layer_settings = _load_all_layer_settings()
         self._suspend_events = False
 
-        panel = wx.Panel(self)
+        outer_panel = wx.Panel(self)
         root = wx.BoxSizer(wx.HORIZONTAL)
+
+        settings_scroll = wx.ScrolledWindow(outer_panel, style=wx.VSCROLL)
+        settings_scroll.SetScrollRate(0, 12)
+        self.settings_scroll = settings_scroll
 
         left = wx.BoxSizer(wx.VERTICAL)
         grid = wx.FlexGridSizer(rows=0, cols=2, vgap=6, hgap=10)
         grid.AddGrowableCol(1, 1)
 
+        panel = settings_scroll
         self.layer_choice = wx.Choice(panel, choices=layer_choices)
-        self.mode_choice = wx.Choice(panel, choices=["hatch", "contour_offsets", "drill_spirals"])
+        self.mode_choice = wx.Choice(panel, choices=["hatch", "contour_offsets", "drill"])
         self.angle_ctrl = wx.TextCtrl(panel)
         self.spacing_ctrl = wx.TextCtrl(panel)
         self.manual_spacing_ctrl = wx.CheckBox(panel, label="Use manual hatch spacing")
         self.radius_ctrl = wx.TextCtrl(panel)
         self.min_area_ctrl = wx.TextCtrl(panel)
+        self.drill_style_choice = wx.Choice(panel, choices=list(DRILL_STYLES))
+        self.drill_contour_start_ctrl = wx.TextCtrl(panel)
+        self.drill_contour_spacing_ctrl = wx.TextCtrl(panel)
+        self.drill_contour_count_ctrl = wx.TextCtrl(panel)
         self.spiral_turns_ctrl = wx.TextCtrl(panel)
         self.spiral_inner_ratio_ctrl = wx.TextCtrl(panel)
         self.offset_start_ctrl = wx.TextCtrl(panel)
@@ -542,6 +769,8 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.auto_alternate_direction_ctrl = wx.CheckBox(panel, label="Auto-alternate direction for nested contours (holes)")
         self.outer_zone_only_ctrl = wx.CheckBox(panel, label="Outer zone only (largest polygon)")
         self.alternate_nesting_hatch_ctrl = wx.CheckBox(panel, label="Alternate nested contours (text mode)")
+        self.invert_alternate_nesting_ctrl = wx.CheckBox(panel, label="Invert alternation (flip which nesting depth is hatched)")
+        self.multi_angle_hatch_ctrl = wx.CheckBox(panel, label="Multi-angle hatch (overlay 0/45/90 deg)")
 
         def add_row(label: str, control: wx.Window):
             grid.Add(wx.StaticText(panel, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -554,6 +783,10 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         add_row("Manual spacing", self.manual_spacing_ctrl)
         add_row("Laser radius (mm)", self.radius_ctrl)
         add_row("Minimum hatch area (mm^2)", self.min_area_ctrl)
+        add_row("Drill style", self.drill_style_choice)
+        add_row("Drill contour start offset (mm)", self.drill_contour_start_ctrl)
+        add_row("Drill contour spacing (mm)", self.drill_contour_spacing_ctrl)
+        add_row("Drill contour count (perimeters)", self.drill_contour_count_ctrl)
         add_row("Drill spiral turns", self.spiral_turns_ctrl)
         add_row("Drill spiral inner ratio", self.spiral_inner_ratio_ctrl)
         add_row("Contour start offset (mm)", self.offset_start_ctrl)
@@ -563,6 +796,8 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         add_row("Auto-alternate nested direction", self.auto_alternate_direction_ctrl)
         add_row("Edge-cuts cleaning", self.outer_zone_only_ctrl)
         add_row("Nested text hatching", self.alternate_nesting_hatch_ctrl)
+        add_row("Invert nested hatching", self.invert_alternate_nesting_ctrl)
+        add_row("Multi-angle hatch", self.multi_angle_hatch_ctrl)
 
         left.Add(grid, 0, wx.ALL | wx.EXPAND, 10)
 
@@ -580,14 +815,27 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.export_btn = wx.Button(panel, label="Export DXF...")
         left.Add(self.export_btn, 0, wx.ALL | wx.EXPAND, 10)
 
-        self.canvas = PreviewCanvas(panel)
+        self.export_all_btn = wx.Button(panel, label="Export All Layers...")
+        left.Add(self.export_all_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 10)
 
-        root.Add(left, 0, wx.EXPAND)
-        root.Add(self.canvas, 1, wx.ALL | wx.EXPAND, 6)
+        settings_scroll.SetSizer(left)
+        settings_scroll.FitInside()
 
-        panel.SetSizer(root)
+        right = wx.BoxSizer(wx.VERTICAL)
+        canvas_hint = wx.StaticText(
+            outer_panel,
+            label="Scroll to zoom, drag to pan, double-click or middle-click to reset view.",
+        )
+        right.Add(canvas_hint, 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
+        self.canvas = PreviewCanvas(outer_panel)
+        right.Add(self.canvas, 1, wx.ALL | wx.EXPAND, 6)
+
+        root.Add(settings_scroll, 0, wx.EXPAND)
+        root.Add(right, 1, wx.EXPAND)
+
+        outer_panel.SetSizer(root)
         outer = wx.BoxSizer(wx.VERTICAL)
-        outer.Add(panel, 1, wx.EXPAND)
+        outer.Add(outer_panel, 1, wx.EXPAND)
         outer.Add(self.CreateSeparatedButtonSizer(wx.CLOSE), 0, wx.ALL | wx.EXPAND, 8)
         self.SetSizerAndFit(outer)
         self.SetMinSize((1080, 680))
@@ -595,10 +843,13 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.layer_choice.Bind(wx.EVT_CHOICE, self._on_layer_changed)
         self.mode_choice.Bind(wx.EVT_CHOICE, self._on_settings_changed)
         self.manual_spacing_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
+        self.drill_style_choice.Bind(wx.EVT_CHOICE, self._on_settings_changed)
         self.invert_offset_direction_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
         self.auto_alternate_direction_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
         self.outer_zone_only_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
         self.alternate_nesting_hatch_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
+        self.invert_alternate_nesting_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
+        self.multi_angle_hatch_ctrl.Bind(wx.EVT_CHECKBOX, self._on_settings_changed)
         self.hatch_all_ctrl.Bind(wx.EVT_CHECKBOX, self._on_hatch_all)
         self.zone_list.Bind(wx.EVT_CHECKLISTBOX, self._on_zone_checked)
         for ctrl in (
@@ -606,6 +857,9 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             self.spacing_ctrl,
             self.radius_ctrl,
             self.min_area_ctrl,
+            self.drill_contour_start_ctrl,
+            self.drill_contour_spacing_ctrl,
+            self.drill_contour_count_ctrl,
             self.spiral_turns_ctrl,
             self.spiral_inner_ratio_ctrl,
             self.offset_start_ctrl,
@@ -614,6 +868,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         ):
             ctrl.Bind(wx.EVT_TEXT, self._on_settings_changed)
         self.export_btn.Bind(wx.EVT_BUTTON, self._on_export)
+        self.export_all_btn.Bind(wx.EVT_BUTTON, self._on_export_all)
         self.Bind(wx.EVT_CLOSE, self._on_close_window)
 
         if initial_layer in layer_choices:
@@ -639,6 +894,11 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             self.manual_spacing_ctrl.SetValue(bool(s["useManualSpacing"]))
             self.radius_ctrl.SetValue(f"{float(s['laserRadius']):.4f}".rstrip("0").rstrip("."))
             self.min_area_ctrl.SetValue(f"{float(s['minArea']):.4f}".rstrip("0").rstrip("."))
+            drill_style_idx = self.drill_style_choice.FindString(str(s["drillStyle"]))
+            self.drill_style_choice.SetSelection(drill_style_idx if drill_style_idx != wx.NOT_FOUND else 0)
+            self.drill_contour_start_ctrl.SetValue(f"{float(s['drillContourStart']):.4f}".rstrip("0").rstrip("."))
+            self.drill_contour_spacing_ctrl.SetValue(f"{float(s['drillContourSpacing']):.4f}".rstrip("0").rstrip("."))
+            self.drill_contour_count_ctrl.SetValue(str(int(s["drillContourCount"])))
             self.spiral_turns_ctrl.SetValue(f"{float(s['spiralTurns']):.4f}".rstrip("0").rstrip("."))
             self.spiral_inner_ratio_ctrl.SetValue(f"{float(s['spiralInnerRatio']):.4f}".rstrip("0").rstrip("."))
             self.offset_start_ctrl.SetValue(f"{float(s['offsetStart']):.4f}".rstrip("0").rstrip("."))
@@ -649,17 +909,23 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             self.hatch_all_ctrl.SetValue(bool(s["hatchAll"]))
             self.outer_zone_only_ctrl.SetValue(bool(s["outerZoneOnly"]))
             self.alternate_nesting_hatch_ctrl.SetValue(bool(s["alternateNestingHatch"]))
+            self.invert_alternate_nesting_ctrl.SetValue(bool(s["invertAlternateNesting"]))
+            self.multi_angle_hatch_ctrl.SetValue(bool(s["multiAngleHatch"]))
         finally:
             self._suspend_events = False
 
     def _read_controls_to_settings(self) -> tuple[dict[str, object] | None, str | None]:
         mode = self.mode_choice.GetStringSelection() or "contour_offsets"
+        drill_style = self.drill_style_choice.GetStringSelection() or DEFAULT_DRILL_STYLE
 
         try:
             angle = float(self.angle_ctrl.GetValue())
             spacing = float(self.spacing_ctrl.GetValue())
             laser_radius = float(self.radius_ctrl.GetValue())
             min_area = float(self.min_area_ctrl.GetValue())
+            drill_contour_start = float(self.drill_contour_start_ctrl.GetValue())
+            drill_contour_spacing = float(self.drill_contour_spacing_ctrl.GetValue())
+            drill_contour_count = int(self.drill_contour_count_ctrl.GetValue())
             spiral_turns = float(self.spiral_turns_ctrl.GetValue())
             spiral_inner_ratio = float(self.spiral_inner_ratio_ctrl.GetValue())
             offset_start = float(self.offset_start_ctrl.GetValue())
@@ -674,10 +940,14 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             return None, "Laser radius must be >= 0."
         if mode == "hatch" and min_area < 0:
             return None, "Minimum hatch area must be >= 0."
-        if mode == "drill_spirals" and spiral_turns <= 0:
+        if mode == "drill" and drill_style == "spiral" and spiral_turns <= 0:
             return None, "Drill spiral turns must be greater than 0."
-        if mode == "drill_spirals" and not (0 <= spiral_inner_ratio < 1):
+        if mode == "drill" and drill_style == "spiral" and not (0 <= spiral_inner_ratio < 1):
             return None, "Drill spiral inner ratio must be in [0, 1)."
+        if mode == "drill" and drill_style == "contour" and (
+            drill_contour_start < 0 or drill_contour_spacing < 0 or drill_contour_count <= 0
+        ):
+            return None, "Drill contour settings require non-negative values and count > 0."
         if mode == "contour_offsets" and (offset_start < 0 or offset_spacing < 0 or offset_count <= 0):
             return None, "Contour settings require non-negative values and count > 0."
 
@@ -688,6 +958,10 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             "useManualSpacing": self.manual_spacing_ctrl.GetValue(),
             "laserRadius": laser_radius,
             "minArea": min_area,
+            "drillStyle": drill_style,
+            "drillContourStart": drill_contour_start,
+            "drillContourSpacing": drill_contour_spacing,
+            "drillContourCount": drill_contour_count,
             "spiralTurns": spiral_turns,
             "spiralInnerRatio": spiral_inner_ratio,
             "offsetStart": offset_start,
@@ -698,13 +972,18 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             "hatchAll": self.hatch_all_ctrl.GetValue(),
             "outerZoneOnly": self.outer_zone_only_ctrl.GetValue(),
             "alternateNestingHatch": self.alternate_nesting_hatch_ctrl.GetValue(),
+            "invertAlternateNesting": self.invert_alternate_nesting_ctrl.GetValue(),
+            "multiAngleHatch": self.multi_angle_hatch_ctrl.GetValue(),
         }
         return _sanitize_layer_settings(settings), None
 
     def _refresh_mode_control_states(self) -> None:
         mode = self.mode_choice.GetStringSelection() or "contour_offsets"
         is_contour = mode == "contour_offsets"
-        is_drill = mode == "drill_spirals"
+        is_drill = mode == "drill"
+        drill_style = self.drill_style_choice.GetStringSelection() or DEFAULT_DRILL_STYLE
+        is_drill_spiral = is_drill and drill_style == "spiral"
+        is_drill_contour = is_drill and drill_style == "contour"
         manual = self.manual_spacing_ctrl.GetValue()
 
         self.angle_ctrl.Enable((not is_contour) and (not is_drill))
@@ -712,8 +991,12 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.spacing_ctrl.Enable(is_contour or ((not is_drill) and manual))
         self.radius_ctrl.Enable((not is_contour) and (not is_drill))
         self.min_area_ctrl.Enable((not is_contour) and (not is_drill))
-        self.spiral_turns_ctrl.Enable(is_drill)
-        self.spiral_inner_ratio_ctrl.Enable(is_drill)
+        self.drill_style_choice.Enable(is_drill)
+        self.drill_contour_start_ctrl.Enable(is_drill_contour)
+        self.drill_contour_spacing_ctrl.Enable(is_drill_contour)
+        self.drill_contour_count_ctrl.Enable(is_drill_contour)
+        self.spiral_turns_ctrl.Enable(is_drill_spiral)
+        self.spiral_inner_ratio_ctrl.Enable(is_drill_spiral)
 
         self.offset_start_ctrl.Enable(is_contour)
         self.offset_spacing_ctrl.Enable(is_contour)
@@ -722,6 +1005,11 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.auto_alternate_direction_ctrl.Enable(is_contour)
         self.outer_zone_only_ctrl.Enable((not is_contour) and (not is_drill))
         self.alternate_nesting_hatch_ctrl.Enable((not is_contour) and (not is_drill) and (not self.outer_zone_only_ctrl.GetValue()))
+        self.invert_alternate_nesting_ctrl.Enable(
+            (not is_contour) and (not is_drill) and (not self.outer_zone_only_ctrl.GetValue())
+            and self.alternate_nesting_hatch_ctrl.GetValue()
+        )
+        self.multi_angle_hatch_ctrl.Enable((not is_contour) and (not is_drill))
         self.zone_list.Enable(not is_drill)
         self.hatch_all_ctrl.Enable(not is_drill)
 
@@ -747,7 +1035,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self._refresh_mode_control_states()
 
         mode = self.mode_choice.GetStringSelection() or "contour_offsets"
-        if mode == "drill_spirals":
+        if mode == "drill":
             self.session = None
             self.zone_map = {}
             self.zone_order = []
@@ -814,6 +1102,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
 
     def _on_layer_changed(self, _event) -> None:
         self._persist_current_settings()
+        self.canvas.reset_view()
         self._load_layer(self._current_layer())
 
     def _on_settings_changed(self, _event) -> None:
@@ -857,10 +1146,16 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             "useManualSpacing": settings["useManualSpacing"],
             "laserRadius": settings["laserRadius"],
             "minArea": settings["minArea"],
+            "drillStyle": settings["drillStyle"],
+            "drillContourStart": settings["drillContourStart"],
+            "drillContourSpacing": settings["drillContourSpacing"],
+            "drillContourCount": settings["drillContourCount"],
             "spiralTurns": settings["spiralTurns"],
             "spiralInnerRatio": settings["spiralInnerRatio"],
             "outerZoneOnly": settings["outerZoneOnly"],
             "alternateNestingHatch": settings["alternateNestingHatch"],
+            "invertAlternateNesting": settings["invertAlternateNesting"],
+            "multiAngleHatch": settings["multiAngleHatch"],
             "offsetStart": settings["offsetStart"],
             "offsetSpacing": settings["offsetSpacing"],
             "offsetCount": settings["offsetCount"],
@@ -877,12 +1172,16 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
 
         mode = str(payload.get("mode", "hatch"))
 
-        if mode == "drill_spirals":
+        if mode == "drill":
             try:
-                circles, segments = build_kicad_drill_spiral_geometry(
+                circles, segments = build_kicad_drill_geometry(
                     self.board_path,
+                    style=str(payload.get("drillStyle", DEFAULT_DRILL_STYLE)),
                     spiral_turns=float(payload.get("spiralTurns", 1.75)),
                     spiral_inner_ratio=float(payload.get("spiralInnerRatio", 0.10)),
+                    contour_start_offset=float(payload.get("drillContourStart", 0.05)),
+                    contour_spacing=float(payload.get("drillContourSpacing", 0.05)),
+                    contour_count=int(payload.get("drillContourCount", 4)),
                 )
             except Exception as exc:
                 self.status_lbl.SetLabel(f"Preview failed: {exc}")
@@ -916,7 +1215,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             return
 
         mode = str(payload.get("mode", "hatch"))
-        if mode != "drill_spirals" and (self.session is None or self.raw_output_path is None):
+        if mode != "drill" and (self.session is None or self.raw_output_path is None):
             _message("Fiber Laser Export", "No preview data available to export.", wx.OK | wx.ICON_ERROR)
             return
 
@@ -956,6 +1255,81 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
 
         final_path.write_bytes(body)
         self.status_lbl.SetLabel(f"Export complete: {final_path}")
+
+    def _on_export_all(self, _event) -> None:
+        self._persist_current_settings()
+
+        targets = _export_all_target_layers(self.layer_choices)
+        if not targets:
+            _message(
+                "Fiber Laser Export All",
+                "None of the standard layers (F.Cu, B.Cu, Edge.Cuts, F.Mask, B.Mask) were found on this board.",
+                wx.OK | wx.ICON_WARNING,
+            )
+            return
+
+        with wx.DirDialog(self, "Choose a folder for the exported DXF files") as dir_dlg:
+            if dir_dlg.ShowModal() != wx.ID_OK:
+                return
+            out_dir = Path(dir_dlg.GetPath())
+
+        self.status_lbl.SetLabel("Exporting all layers...")
+        wx.YieldIfNeeded()
+
+        config: dict[str, object] = {"board": str(self.board_path), "layers": {}}
+        written: list[str] = []
+        errors: list[str] = []
+
+        for layer in targets:
+            settings = self._all_layer_settings.get(layer, _default_layer_settings_for(layer))
+            raw_path: Path | None = None
+            try:
+                session, zone_ids, raw_path = _build_session_for_kicad_layer(
+                    self.kicad_cli, self.board_path, layer
+                )
+                payload = _payload_from_settings(settings, board_path=self.board_path, selected_ids=zone_ids)
+                dxf_bytes = _generate_export_dxf_bytes(session, payload)
+            except Exception as exc:
+                errors.append(f"{layer}: {exc}")
+                continue
+            finally:
+                if raw_path is not None and raw_path.exists():
+                    try:
+                        raw_path.unlink()
+                    except Exception:
+                        pass
+
+            safe_layer = layer.replace(".", "_").replace("/", "_")
+            out_path = out_dir / f"{self.board_path.stem}_{safe_layer}.dxf"
+            out_path.write_bytes(dxf_bytes)
+            written.append(str(out_path))
+            config["layers"][layer] = settings
+
+        drill_settings = self._all_layer_settings.get(EXPORT_ALL_DRILL_LAYER, _default_layer_settings_for(EXPORT_ALL_DRILL_LAYER))
+        drill_settings = dict(drill_settings)
+        drill_settings["mode"] = "drill"
+        try:
+            drill_payload = _payload_from_settings(drill_settings, board_path=self.board_path, selected_ids=[])
+            dxf_bytes = _generate_export_dxf_bytes(None, drill_payload)
+            out_path = out_dir / f"{self.board_path.stem}_Drill.dxf"
+            out_path.write_bytes(dxf_bytes)
+            written.append(str(out_path))
+            config["layers"][EXPORT_ALL_DRILL_LAYER] = drill_settings
+        except Exception as exc:
+            errors.append(f"Drill: {exc}")
+
+        try:
+            config_path = out_dir / f"{self.board_path.stem}_export_all_config.json"
+            config_path.write_text(json.dumps(config, indent=2))
+        except Exception:
+            pass
+
+        if errors:
+            summary = f"Exported {len(written)} file(s) to {out_dir}.\n\nFailed:\n" + "\n".join(errors)
+            _message("Fiber Laser Export All", summary, wx.OK | wx.ICON_WARNING)
+        else:
+            _message("Fiber Laser Export All", f"Exported {len(written)} file(s) to {out_dir}.", wx.OK | wx.ICON_INFORMATION)
+        self.status_lbl.SetLabel(f"Export all complete: {len(written)} file(s) -> {out_dir}")
 
     def _on_close_window(self, _event) -> None:
         self._persist_current_settings()

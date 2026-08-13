@@ -3,7 +3,10 @@ from __future__ import annotations
 import math
 
 import minidxf as ezdxf
-from contour_offsets import generate_contour_offset_loops, generate_contour_offset_segments
+from contour_offsets import (
+    generate_contour_offset_loops_multi,
+    loop_to_segments,
+)
 
 from app_sessions import UploadSession
 
@@ -578,7 +581,12 @@ def _build_selected_nesting(zone_polys: dict[str, Ring], selected_ids: list[str]
     return parents, depths
 
 
-def alternating_hatch_geometries(selected_ids: list[str], zone_polys: dict[str, Ring], laser_radius: float) -> list[tuple[str, dict[str, object], int]]:
+def alternating_hatch_geometries(
+    selected_ids: list[str],
+    zone_polys: dict[str, Ring],
+    laser_radius: float,
+    invert_alternate_nesting: bool = False,
+) -> list[tuple[str, dict[str, object], int]]:
     valid_ids = [zid for zid in selected_ids if zid in zone_polys]
     if not valid_ids:
         return []
@@ -589,10 +597,15 @@ def alternating_hatch_geometries(selected_ids: list[str], zone_polys: dict[str, 
         if parent is not None and parent in children:
             children[parent].append(zid)
 
+    # By default, even nesting depths (outer contours) are hatched and odd
+    # depths (first-level holes) are skipped. `invert_alternate_nesting` flips
+    # this parity so odd depths get hatched instead.
+    keep_parity = 1 if invert_alternate_nesting else 0
+
     geoms: list[tuple[str, dict[str, object], int]] = []
     for zid in valid_ids:
         depth = depths.get(zid, 0)
-        if depth % 2 != 0:
+        if depth % 2 != keep_parity:
             continue
 
         hole_ids = [cid for cid in children.get(zid, []) if depths.get(cid, -1) == depth + 1]
@@ -638,9 +651,20 @@ def hatch_segments_for_angle(geom, angle_deg: float, spacing: float) -> list[lis
     return segments
 
 
-def hatch_segments(geom, angle_deg: float, spacing: float) -> list[list[list[float]]]:
+#: Fixed angle set used by the "multi-angle" overlapping hatch option (issue #8):
+#: overlay 0, 45, and 90 degree passes together for more even coverage instead
+#: of a single angle.
+MULTI_ANGLE_HATCH_ANGLES: tuple[float, ...] = (0.0, 45.0, 90.0)
+
+
+def hatch_segments(geom, angle_deg: float, spacing: float, multi_angle: bool = False) -> list[list[list[float]]]:
     if spacing <= 0:
         return []
+    if multi_angle:
+        segments: list[list[list[float]]] = []
+        for a in MULTI_ANGLE_HATCH_ANGLES:
+            segments.extend(hatch_segments_for_angle(geom, a, spacing))
+        return segments
     return hatch_segments_for_angle(geom, angle_deg, spacing)
 
 
@@ -734,6 +758,8 @@ def generate_hatch_for_selection(
     min_area: float,
     outer_zone_only: bool,
     alternate_nesting_hatch: bool = False,
+    invert_alternate_nesting: bool = False,
+    multi_angle_hatch: bool = False,
 ) -> tuple[list[list[list[float]]], dict[str, int]]:
     zone_polys = build_zone_polygons(session.zone_map)
     normalized_ids = _selected_zone_ids(zone_polys, selected_ids)
@@ -742,7 +768,7 @@ def generate_hatch_for_selection(
         geom = outer_only_hatch_geometry(zone_polys, laser_radius)
         segments: list[list[list[float]]] = []
         if geom is not None and geom_area(geom) >= min_area and passes_min_width(geom, math.sqrt(max(min_area, 0.0))):
-            segments = hatch_segments(geom, angle, spacing)
+            segments = hatch_segments(geom, angle, spacing, multi_angle=multi_angle_hatch)
 
         min_seg_len = max(spacing * 0.75, laser_radius * 2.0, 0.02)
         segments, dropped_tiny, dropped_dupe = sanitize_segments(
@@ -771,7 +797,9 @@ def generate_hatch_for_selection(
         used_zones = 0
         min_width = math.sqrt(max(min_area, 0.0))
 
-        for _zone_id, geom, _depth in alternating_hatch_geometries(normalized_ids, zone_polys, laser_radius):
+        for _zone_id, geom, _depth in alternating_hatch_geometries(
+            normalized_ids, zone_polys, laser_radius, invert_alternate_nesting=invert_alternate_nesting
+        ):
             if geom_area(geom) < min_area:
                 filtered_small += 1
                 continue
@@ -779,7 +807,7 @@ def generate_hatch_for_selection(
                 filtered_narrow += 1
                 continue
 
-            zone_segments = hatch_segments(geom, angle, spacing)
+            zone_segments = hatch_segments(geom, angle, spacing, multi_angle=multi_angle_hatch)
             if zone_segments:
                 segments.extend(zone_segments)
                 used_zones += 1
@@ -846,7 +874,7 @@ def generate_hatch_for_selection(
             filtered_narrow += 1
             continue
 
-        zone_segments = hatch_segments(geom, angle, spacing)
+        zone_segments = hatch_segments(geom, angle, spacing, multi_angle=multi_angle_hatch)
         if zone_segments:
             segments.extend(zone_segments)
             used_zones += 1
@@ -916,22 +944,18 @@ def generate_contour_offsets_for_selection(
         zone_polys, normalized_ids, invert_offset_direction, auto_alternate_direction
     )
 
+    valid_ids = [zid for zid in normalized_ids if zid in zone_polys]
+    polys = [zone_polys[zid] for zid in valid_ids]
+    flags = [invert_flags.get(zid, invert_offset_direction) for zid in valid_ids]
+    loops_per_zone = generate_contour_offset_loops_multi(polys, start_offset, spacing, repetitions, flags)
+
     segments: list[list[list[float]]] = []
     used_zones = 0
-    for zone_id in normalized_ids:
-        base = zone_polys.get(zone_id)
-        if base is None:
-            continue
-        zone_segments = generate_contour_offset_segments(
-            base,
-            start_offset,
-            spacing,
-            repetitions,
-            invert_direction=invert_flags.get(zone_id, invert_offset_direction),
-        )
-        if zone_segments:
-            segments.extend(zone_segments)
+    for zone_loops in loops_per_zone:
+        if zone_loops:
             used_zones += 1
+        for loop in zone_loops:
+            segments.extend(loop_to_segments(loop))
 
     min_seg_len = max(spacing * 0.02, 1e-6)
     segments, dropped_tiny, dropped_dupe = sanitize_segments(
@@ -966,18 +990,11 @@ def build_contour_loops_for_selection(
     invert_flags = resolve_contour_invert_flags(
         zone_polys, normalized_ids, invert_offset_direction, auto_alternate_direction
     )
+    valid_ids = [zid for zid in normalized_ids if zid in zone_polys]
+    polys = [zone_polys[zid] for zid in valid_ids]
+    flags = [invert_flags.get(zid, invert_offset_direction) for zid in valid_ids]
+    loops_per_zone = generate_contour_offset_loops_multi(polys, start_offset, offset_spacing, offset_count, flags)
     loops: list[list[tuple[float, float]]] = []
-    for zid in normalized_ids:
-        base = zone_polys.get(zid)
-        if base is None:
-            continue
-        loops.extend(
-            generate_contour_offset_loops(
-                base,
-                start_offset,
-                offset_spacing,
-                offset_count,
-                invert_direction=invert_flags.get(zid, invert_offset_direction),
-            )
-        )
+    for zone_loops in loops_per_zone:
+        loops.extend(zone_loops)
     return loops
