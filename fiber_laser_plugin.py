@@ -14,7 +14,7 @@ import pcbnew
 import wx
 
 import minidxf as ezdxf
-from offline_export import build_kicad_drill_spiral_geometry
+from offline_export import build_kicad_drill_spiral_geometry, normalize_cli_path
 from app_geometry import (
     DEFAULT_MIN_HATCH_AREA,
     build_contour_loops_for_selection,
@@ -189,7 +189,7 @@ def _find_kicad_cli() -> str | None:
     for candidate in ("kicad-cli", "kicad-cli.exe"):
         resolved = shutil.which(candidate)
         if resolved:
-            return resolved
+            return normalize_cli_path(resolved)
     return None
 
 
