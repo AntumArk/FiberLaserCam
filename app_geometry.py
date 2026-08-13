@@ -804,6 +804,8 @@ def generate_hatch_for_selection(
         }
         return segments, stats
 
+    _parents, _depths = _build_selected_nesting(zone_polys, normalized_ids)
+
     seen_centroids: set[tuple[float, float]] = set()
     filtered_small = 0
     filtered_centroid = 0
@@ -814,6 +816,8 @@ def generate_hatch_for_selection(
     for zone_id in normalized_ids:
         poly = zone_polys.get(zone_id)
         if poly is None:
+            continue
+        if _depths.get(zone_id, 0) % 2 != 0:
             continue
         if polygon_area(poly) < min_area:
             filtered_small += 1
