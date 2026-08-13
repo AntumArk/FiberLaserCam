@@ -28,11 +28,15 @@ def _collect_polygons_from_dxf(doc: ezdxf.Drawing) -> list[list[tuple[float, flo
     return collect_entities_as_polygons(doc)
 
 
+def normalize_cli_path(path: str) -> str:
+    return path.rstrip().removesuffix(";")
+
+
 def _find_kicad_cli() -> str | None:
     for candidate in ("kicad-cli", "kicad-cli.exe"):
-        resolved = shutil.which(candidate)
-        if resolved:
-            return resolved
+    resolved = shutil.which(candidate)
+    if resolved:
+        return normalize_cli_path(resolved)
     return None
 
 
