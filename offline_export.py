@@ -34,9 +34,9 @@ def normalize_cli_path(path: str) -> str:
 
 def _find_kicad_cli() -> str | None:
     for candidate in ("kicad-cli", "kicad-cli.exe"):
-    resolved = shutil.which(candidate)
-    if resolved:
-        return normalize_cli_path(resolved)
+        resolved = shutil.which(candidate)
+        if resolved:
+            return normalize_cli_path(resolved)
     return None
 
 
