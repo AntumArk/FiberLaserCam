@@ -14,6 +14,7 @@ import pcbnew
 import wx
 
 import minidxf as ezdxf
+import pcbnew_geometry
 from offline_export import build_kicad_drill_geometry, DEFAULT_DRILL_STYLE, DRILL_STYLES
 from app_geometry import (
     DEFAULT_MIN_HATCH_AREA,
@@ -22,8 +23,10 @@ from app_geometry import (
     generate_contour_offsets_for_selection,
     generate_hatch_for_selection,
     resolve_spacing,
+    sanitize_segments,
 )
 from app_sessions import UploadSession
+from contour_offsets import loop_to_segments
 
 
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -268,16 +271,25 @@ def _run_kicad_dxf_export(kicad_cli: str, board_path: Path, output_path: Path, l
         raise RuntimeError(details)
 
 
-def _export_kicad_layer_via_pcbnew(layer: str, output_path: Path) -> None:
+def _export_kicad_layer_via_pcbnew(
+    layer: str, output_path: Path
+) -> tuple[dict[int, object], dict[str, int]]:
     """pcbnew-native counterpart to _run_kicad_dxf_export: writes a DXF of one
     copper layer's net-merged polygons directly from the live board (no
     kicad-cli subprocess). Same-net pads/tracks/zones are merged with KiCad's
     own SHAPE_POLY_SET.Simplify(), so touching same-net features never
     produce separate/overlapping polygons the way a raw kicad-cli DXF export
     can. Downstream zone-selection, offsetting, and hatching are unchanged --
-    only the shape of the exported polygons differs from the DXF path."""
-    import pcbnew_geometry
+    only the shape of the exported polygons differs from the DXF path.
 
+    Also returns ``(net_polys, zone_net_map)``: the per-net merged
+    ``SHAPE_POLY_SET`` dict, and a ``zone_id -> net_code`` mapping (zone ids
+    assigned in the same 1-based, non-degenerate-ring order that
+    ``build_zone_payload_from_dxf_path`` uses when it re-parses the DXF this
+    function writes). Contour mode uses these to offset with KiCad's own
+    Inflate() directly instead of going back through the slower, DXF-derived
+    per-vertex miter-join offsetting -- without them, callers would have to
+    re-extract net polygons from the board a second time."""
     board = pcbnew.GetBoard()
     layer_id = pcbnew_geometry.resolve_layer_id(board, layer)
     net_polys = pcbnew_geometry.build_net_polygons_for_layer(board, layer_id)
@@ -288,15 +300,20 @@ def _export_kicad_layer_via_pcbnew(layer: str, output_path: Path) -> None:
         doc.layers.new(layer, dxfattribs={"color": 1})
 
     msp = doc.modelspace()
-    for polyset in net_polys.values():
+    zone_net_map: dict[str, int] = {}
+    zone_index = 0
+    for net_code, polyset in net_polys.items():
         for ring in pcbnew_geometry.polyset_to_rings(polyset):
             if len(ring) < 3:
                 continue
+            zone_index += 1
+            zone_net_map[str(zone_index)] = net_code
             closed = list(ring) + [ring[0]]
             msp.add_lwpolyline(closed, close=False, dxfattribs={"layer": layer})
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.saveas(str(output_path))
+    return net_polys, zone_net_map
 
 
 class PreviewCanvas(wx.Panel):
@@ -510,12 +527,15 @@ def _export_all_target_layers(layer_choices: list[str]) -> list[str]:
 
 def _build_session_for_kicad_layer(
     kicad_cli: str, board_path: Path, layer: str, use_pcbnew: bool = False
-) -> tuple[UploadSession, list[str], Path]:
+) -> tuple[UploadSession, list[str], Path, dict[str, object] | None]:
     """Export a single KiCad layer to a temp DXF and build a session + zone id list from it.
 
     When ``use_pcbnew`` is True, the layer is exported via the pcbnew-native
     path (_export_kicad_layer_via_pcbnew, no kicad-cli subprocess, net-merged
-    polygons) instead of kicad-cli.
+    polygons) instead of kicad-cli, and the returned 4th element is a
+    ``{"net_polys": ..., "zone_net_map": ...}`` dict letting contour mode
+    offset directly with pcbnew's Inflate() instead of the slower DXF-derived
+    per-vertex offsetting (``None`` when ``use_pcbnew`` is False).
 
     The caller is responsible for deleting the returned temp DXF path once done with it.
     On failure, this function cleans up the temp DXF itself before re-raising, since the
@@ -523,9 +543,11 @@ def _build_session_for_kicad_layer(
     """
     TEMP_DXF_DIR.mkdir(parents=True, exist_ok=True)
     raw_output_path = TEMP_DXF_DIR / f"{board_path.stem}-fiber-export-{uuid.uuid4().hex}.dxf"
+    pcbnew_ctx: dict[str, object] | None = None
     try:
         if use_pcbnew:
-            _export_kicad_layer_via_pcbnew(layer, raw_output_path)
+            net_polys, zone_net_map = _export_kicad_layer_via_pcbnew(layer, raw_output_path)
+            pcbnew_ctx = {"net_polys": net_polys, "zone_net_map": zone_net_map}
         else:
             _run_kicad_dxf_export(kicad_cli, board_path, raw_output_path, layer)
         session, zones = _build_local_session_from_dxf(raw_output_path)
@@ -537,7 +559,7 @@ def _build_session_for_kicad_layer(
                 pass
         raise
     zone_ids = [str(z.get("id", "")).strip() for z in zones if str(z.get("id", "")).strip()]
-    return session, zone_ids, raw_output_path
+    return session, zone_ids, raw_output_path, pcbnew_ctx
 
 
 def _payload_from_settings(settings: dict[str, object], *, board_path: Path, selected_ids: list[str]) -> dict[str, object]:
@@ -569,11 +591,28 @@ def _payload_from_settings(settings: dict[str, object], *, board_path: Path, sel
     }
 
 
+def _selected_net_polys(selected_ids, pcbnew_ctx: dict[str, object] | None) -> dict[int, object] | None:
+    """Resolve the selected zone ids back to their originating net codes and
+    return the corresponding subset of ``pcbnew_ctx["net_polys"]``, restricted
+    to only the currently-selected nets (mirroring how the DXF-based path
+    only lets selected zones interact for overcut prevention). Returns
+    ``None`` when ``pcbnew_ctx`` is unavailable (i.e. not using pcbnew-native
+    geometry for this layer)."""
+    if pcbnew_ctx is None:
+        return None
+    zone_net_map = pcbnew_ctx["zone_net_map"]
+    net_polys = pcbnew_ctx["net_polys"]
+    selected = {str(zid) for zid in selected_ids}
+    net_codes = {zone_net_map[zid] for zid in selected if zid in zone_net_map}
+    return {code: net_polys[code] for code in net_codes if code in net_polys}
+
+
 def _generate_preview_segments(
     session: UploadSession,
     payload: dict[str, object],
     *,
     outer_only_override: bool | None = None,
+    pcbnew_ctx: dict[str, object] | None = None,
 ) -> list[list[list[float]]]:
     selected_ids = payload.get("selectedIds") or []
     mode = str(payload.get("mode", "hatch"))
@@ -604,6 +643,26 @@ def _generate_preview_segments(
         offset_count = int(payload.get("offsetCount", 3))
         invert_offset_direction = bool(payload.get("invertOffsetDirection", False))
         auto_alternate_direction = bool(payload.get("autoAlternateContourDirection", True))
+
+        selected_net_polys = _selected_net_polys(selected_ids, pcbnew_ctx)
+        if selected_net_polys is not None:
+            loops = pcbnew_geometry.generate_contour_offsets_from_net_polys(
+                selected_net_polys,
+                start_offset,
+                offset_spacing,
+                offset_count,
+                invert_direction=invert_offset_direction,
+                auto_alternate_direction=auto_alternate_direction,
+            )
+            segments: list[list[list[float]]] = []
+            for loop in loops:
+                segments.extend(loop_to_segments(loop))
+            min_seg_len = max(offset_spacing * 0.02, 1e-6)
+            segments, _dropped_tiny, _dropped_dupe = sanitize_segments(
+                segments, min_length=min_seg_len, quant_grid=1e-5
+            )
+            return segments
+
         segments, _ = generate_contour_offsets_for_selection(
             session,
             selected_ids,
@@ -654,6 +713,7 @@ def _generate_export_dxf_bytes(
     payload: dict[str, object],
     *,
     outer_only_override: bool | None = None,
+    pcbnew_ctx: dict[str, object] | None = None,
 ) -> bytes:
     selected_ids = payload.get("selectedIds") or []
     mode = str(payload.get("mode", "hatch"))
@@ -701,24 +761,27 @@ def _generate_export_dxf_bytes(
         offset_count = int(payload.get("offsetCount", 3))
         invert_offset_direction = bool(payload.get("invertOffsetDirection", False))
         auto_alternate_direction = bool(payload.get("autoAlternateContourDirection", True))
-        segments, _ = generate_contour_offsets_for_selection(
-            session,
-            selected_ids,
-            start_offset,
-            offset_spacing,
-            offset_count,
-            invert_offset_direction=invert_offset_direction,
-            auto_alternate_direction=auto_alternate_direction,
-        )
-        loops = build_contour_loops_for_selection(
-            session,
-            selected_ids,
-            start_offset,
-            offset_spacing,
-            offset_count,
-            invert_offset_direction=invert_offset_direction,
-            auto_alternate_direction=auto_alternate_direction,
-        )
+
+        selected_net_polys = _selected_net_polys(selected_ids, pcbnew_ctx)
+        if selected_net_polys is not None:
+            loops = pcbnew_geometry.generate_contour_offsets_from_net_polys(
+                selected_net_polys,
+                start_offset,
+                offset_spacing,
+                offset_count,
+                invert_direction=invert_offset_direction,
+                auto_alternate_direction=auto_alternate_direction,
+            )
+        else:
+            loops = build_contour_loops_for_selection(
+                session,
+                selected_ids,
+                start_offset,
+                offset_spacing,
+                offset_count,
+                invert_offset_direction=invert_offset_direction,
+                auto_alternate_direction=auto_alternate_direction,
+            )
     else:
         segments = _generate_preview_segments(session, payload, outer_only_override=outer_only_override)
         loops = []
@@ -774,6 +837,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self.zone_map: dict[str, list[list[float]]] = {}
         self.zone_order: list[str] = []
         self.raw_output_path: Path | None = None
+        self._pcbnew_ctx: dict[str, object] | None = None
         self._all_layer_settings = _load_all_layer_settings()
         self._suspend_events = False
 
@@ -1087,6 +1151,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             self.session = None
             self.zone_map = {}
             self.zone_order = []
+            self._pcbnew_ctx = None
             self.zone_list.Clear()
             self.status_lbl.SetLabel("Drill mode: reading drill holes from board data.")
             self._refresh_preview()
@@ -1098,9 +1163,11 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         TEMP_DXF_DIR.mkdir(parents=True, exist_ok=True)
         raw_output_path = TEMP_DXF_DIR / f"{self.board_path.stem}-fiber-export-{uuid.uuid4().hex}.dxf"
         use_pcbnew = bool(settings.get("usePcbnewGeometry", False))
+        self._pcbnew_ctx = None
         try:
             if use_pcbnew:
-                _export_kicad_layer_via_pcbnew(layer, raw_output_path)
+                net_polys, zone_net_map = _export_kicad_layer_via_pcbnew(layer, raw_output_path)
+                self._pcbnew_ctx = {"net_polys": net_polys, "zone_net_map": zone_net_map}
             else:
                 _run_kicad_dxf_export(self.kicad_cli, self.board_path, raw_output_path, layer)
         except Exception as exc:
@@ -1264,7 +1331,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             return
 
         try:
-            segments = _generate_preview_segments(self.session, payload)
+            segments = _generate_preview_segments(self.session, payload, pcbnew_ctx=self._pcbnew_ctx)
         except Exception as exc:
             self.status_lbl.SetLabel(f"Preview failed: {exc}")
             self.canvas.set_data(self.zone_map, set(self._selected_ids()), [])
@@ -1295,7 +1362,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             )
 
         try:
-            body = _generate_export_dxf_bytes(export_session, payload)
+            body = _generate_export_dxf_bytes(export_session, payload, pcbnew_ctx=self._pcbnew_ctx)
         except Exception as exc:
             _message("Fiber Laser Export", f"Export failed: {exc}", wx.OK | wx.ICON_ERROR)
             return
@@ -1348,12 +1415,12 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             settings = self._all_layer_settings.get(layer, _default_layer_settings_for(layer))
             raw_path: Path | None = None
             try:
-                session, zone_ids, raw_path = _build_session_for_kicad_layer(
+                session, zone_ids, raw_path, pcbnew_ctx = _build_session_for_kicad_layer(
                     self.kicad_cli, self.board_path, layer,
                     use_pcbnew=bool(settings.get("usePcbnewGeometry", False)),
                 )
                 payload = _payload_from_settings(settings, board_path=self.board_path, selected_ids=zone_ids)
-                dxf_bytes = _generate_export_dxf_bytes(session, payload)
+                dxf_bytes = _generate_export_dxf_bytes(session, payload, pcbnew_ctx=pcbnew_ctx)
             except Exception as exc:
                 errors.append(f"{layer}: {exc}")
                 continue

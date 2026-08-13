@@ -177,8 +177,11 @@ Benefits over the DXF path:
 - Offsetting uses `SHAPE_POLY_SET.Inflate()` (Clipper-backed), avoiding self-intersecting artifacts that a naive per-vertex miter join can produce on tight concave curves.
 - Overcut prevention between different nets uses exact `BooleanIntersection()` checks instead of segment-intersection heuristics.
 - No `kicad-cli` subprocess call for the layer(s) using this source.
+- Substantially faster on boards with many nets/vertices -- the offsetting itself is native Clipper code instead of pure-Python per-vertex math.
 
 Requirement: this path needs the `pcbnew` Python module to be importable in the process running the export. That's automatic for the **live GUI plugin** (already running inside KiCad's own Python), but for CLI/offline use it means running the exporter through a Python that has `pcbnew` on its path -- KiCad's own bundled interpreter, or a system KiCad install where `pcbnew` is on `sys.path`. If `pcbnew` isn't importable, `--geometry-source pcbnew` raises a clear error; omit the flag (or use `"geometry_source": "dxf"`, the default) to use the regular `kicad-cli`-based path instead, which has no such requirement.
+
+In the live GUI plugin, checking the "Use pcbnew-native geometry" setting (see [Core Launcher Settings](#core-launcher-settings)) gets you this same `Inflate()`-based offsetting for `contour_offsets` mode, in addition to the net-merge benefit that setting also gives `hatch` mode. Zone selection, preview, and export in the dialog work exactly the same either way -- only the offsetting/merge engine differs.
 
 ### PCM Package Notes
 
@@ -236,7 +239,8 @@ These settings exist in the KiCad plugin dialog. The cutting impact notes descri
 - `Geometry source` (checkbox: "Use pcbnew-native geometry")
   - Unchecked (default): exports the layer via `kicad-cli` to DXF, then parses it (the original path).
   - Checked: builds the layer's polygons directly from the live board (pads/tracks/zones), merging same-net touching features with KiCad's own `SHAPE_POLY_SET.Simplify()` instead of relying on DXF geometry alone. See [pcbnew-Native Geometry Source](#pcbnew-native-geometry-source-contour-mode) below. Has no effect in `drill` mode, which always reads board data directly.
-  - Cutting impact: none by itself (same downstream hatch/contour generation); primarily fixes missing/incorrectly-split traces where same-net copper touches at a seam, and avoids a `kicad-cli` subprocess call per layer.
+  - Cutting impact: none by itself (same downstream hatch generation); primarily fixes missing/incorrectly-split traces where same-net copper touches at a seam, and avoids a `kicad-cli` subprocess call per layer.
+  - In `contour_offsets` mode specifically, checking this also switches offsetting itself from the custom per-vertex miter-join code to KiCad's own Clipper-backed `SHAPE_POLY_SET.Inflate()`, which is both much faster on boards with many nets/vertices and immune to the self-intersecting "wiggle" artifacts the miter-join code can produce on tight concave curves.
 
 #### Hatch Mode Settings
 

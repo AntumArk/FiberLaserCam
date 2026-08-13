@@ -192,13 +192,37 @@ def generate_contour_offsets_from_board(
     growth for a given net stopping as soon as it would collide with another
     net's grown region at the same step (overcut prevention).
     """
-    pcbnew = _pcbnew()
     layer_id = resolve_layer_id(board, layer_name)
-    error_iu = pcbnew.FromMM(pcbnew.ARC_HIGH_DEF_MM)
-
     net_polys = build_net_polygons_for_layer(board, layer_id)
+    return generate_contour_offsets_from_net_polys(
+        net_polys,
+        start_offset,
+        spacing,
+        repetitions,
+        invert_direction=invert_direction,
+        auto_alternate_direction=auto_alternate_direction,
+    )
+
+
+def generate_contour_offsets_from_net_polys(
+    net_polys: dict[int, object],
+    start_offset: float,
+    spacing: float,
+    repetitions: int,
+    invert_direction: bool = False,
+    auto_alternate_direction: bool = True,
+) -> list[Ring]:
+    """Same offsetting/overcut-prevention logic as
+    ``generate_contour_offsets_from_board``, but operating on an
+    already-built ``dict[net_code, SHAPE_POLY_SET]`` (e.g. reused across
+    repeated preview/export calls instead of re-extracting it from the board
+    every time, or a subset restricted to only the currently-selected nets).
+    """
     if not net_polys:
         return []
+
+    pcbnew = _pcbnew()
+    error_iu = pcbnew.FromMM(pcbnew.ARC_HIGH_DEF_MM)
 
     net_codes = list(net_polys.keys())
 
