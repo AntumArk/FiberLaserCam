@@ -132,10 +132,8 @@ chmod +x FiberLaserCam-*.AppImage
 
 # Ready-to-run examples:
 #   examples/export_all_layers.sh
-#   examples/export_all_config.default.json
-#   examples/export_all_config.pcbnew_geometry.json
-# The script reads the JSON and runs one single-layer export command per entry
-# (so all layers are exported, one file per invocation).
+# The script runs one single-layer AppImage command per operation/layer
+# (drilling, edge cuts, routing, spraying mask guides, pad clearance).
 ```
 
 Short options: `-s` start offset, `-i` spacing (both in microns), `-n` repetitions. Add `--invert` to offset outward instead of inward. Input selection defaults to `--input-format auto` and can be forced with `--input-format dxf|kicad`. Use `--kicad-layers` to pass an explicit layer list for KiCad source exports. Run with `--help` for the full option list. This tool wraps `offline_export.generate_contour_offset_dxf()` / `generate_hatch_dxf()`, the same functions used internally by the KiCad plugin.
