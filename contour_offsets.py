@@ -70,6 +70,38 @@ def _line_intersection(
     return (float(px), float(py))
 
 
+def _segment_intersection_point(
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    q1: tuple[float, float],
+    q2: tuple[float, float],
+) -> tuple[float, float, float] | None:
+    """Return ``(x, y, t)`` where ``t`` is the intersection's parametric
+    position along ``p1``->``p2`` (0..1), or None if the two *bounded*
+    segments don't cross. Unlike `_line_intersection`, this only reports a
+    hit within both segments' actual extents (with a small tolerance), not
+    the infinite-line intersection."""
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = q1
+    x4, y4 = q2
+    dx1, dy1 = x2 - x1, y2 - y1
+    dx2, dy2 = x4 - x3, y4 - y3
+    den = (dx1 * dy2) - (dy1 * dx2)
+    if abs(den) < 1e-12:
+        return None
+    t = (((x3 - x1) * dy2) - ((y3 - y1) * dx2)) / den
+    u = (((x3 - x1) * dy1) - ((y3 - y1) * dx1)) / den
+    eps = 1e-9
+    if -eps <= t <= 1 + eps and -eps <= u <= 1 + eps:
+        return (float(x1 + (t * dx1)), float(y1 + (t * dy1)), float(t))
+    return None
+
+
+def _point_in_any_ring(point: tuple[float, float], rings: list[list[tuple[float, float]]]) -> bool:
+    return any(_point_in_ring(point, ring) for ring in rings if ring)
+
+
 def _offset_ring(points: list[tuple[float, float]], distance: float) -> list[tuple[float, float]]:
     points = _ensure_ring(points)
     if not points:
@@ -198,12 +230,25 @@ def mirror_segments_x(segments: list[list[list[float]]], axis_x: float) -> list[
     return [[[2.0 * axis_x - p[0], p[1]] for p in seg] for seg in segments]
 
 
-def loop_to_segments(loop: list[tuple[float, float]]) -> list[list[list[float]]]:
-    """Convert a single closed ring into a list of [p1, p2] line segments."""
+def loop_to_segments(
+    loop: list[tuple[float, float]], closed: bool = True
+) -> list[list[list[float]]]:
+    """Convert a ring/path into a list of [p1, p2] line segments.
+
+    When ``closed`` is True (the default, matching every loop shape prior to
+    local overcut-trimming), the wraparound edge from the last point back to
+    the first is included. Pass ``closed=False`` for a path that was locally
+    trimmed against a neighboring feature (see
+    ``trim_ring_against_rings``/``generate_contour_offset_loops_multi``):
+    such a path is intentionally open where it was cut, so the wraparound
+    edge must be omitted to avoid drawing a spurious chord across the
+    trimmed-away gap.
+    """
     segments: list[list[list[float]]] = []
     if len(loop) < 2:
         return segments
-    for idx in range(len(loop)):
+    last_idx = len(loop) if closed else len(loop) - 1
+    for idx in range(last_idx):
         p1 = [float(loop[idx][0]), float(loop[idx][1])]
         p2 = [float(loop[(idx + 1) % len(loop)][0]), float(loop[(idx + 1) % len(loop)][1])]
         segments.append([p1, p2])
@@ -224,6 +269,96 @@ def _point_in_ring(point: tuple[float, float], ring: list[tuple[float, float]]) 
                 inside = not inside
         j = i
     return inside
+
+
+def trim_ring_against_rings(
+    ring: list[tuple[float, float]], others: list[list[tuple[float, float]]]
+) -> tuple[list[list[tuple[float, float]]], bool]:
+    """Locally trim ``ring``'s boundary curve so it excludes any portion that
+    falls inside one of ``others``, instead of discarding the whole ring.
+
+    This is the core of local (as opposed to whole-shape) overcut avoidance:
+    when a contour-offset ring intrudes into a neighboring feature's own
+    offset ring only over part of its length (e.g. a long trace running
+    close by a pad for a short stretch, then away from it), only the
+    intruding stretch is cut out -- the rest of the ring, however far away
+    from any conflict, is kept intact and can keep growing on later steps.
+
+    Returns ``(pieces, closed)``:
+    - If nothing needs trimming, ``pieces`` is ``[ring]`` and ``closed`` is
+      True (the ring is unchanged and still a closed loop).
+    - If the ring is fully swallowed by ``others``, ``pieces`` is ``[]``.
+    - Otherwise ``pieces`` is one or more open polylines tracing the parts of
+      ``ring`` that stay outside ``others``, and ``closed`` is False -- the
+      caller must not add a closing edge back to the first point (see
+      ``loop_to_segments``'s ``closed`` parameter).
+    """
+    others = [o for o in others if o and len(o) >= 3]
+    if not others or len(ring) < 2:
+        return ([ring] if ring else []), True
+
+    n = len(ring)
+    seq: list[tuple[float, float]] = []
+    for i in range(n):
+        p1 = ring[i]
+        p2 = ring[(i + 1) % n]
+        if not seq or math.hypot(p1[0] - seq[-1][0], p1[1] - seq[-1][1]) > 1e-9:
+            seq.append(p1)
+        cuts: list[tuple[float, tuple[float, float]]] = []
+        for other in others:
+            m = len(other)
+            for j in range(m):
+                q1 = other[j]
+                q2 = other[(j + 1) % m]
+                hit = _segment_intersection_point(p1, p2, q1, q2)
+                if hit is not None:
+                    cuts.append((hit[2], (hit[0], hit[1])))
+        cuts.sort(key=lambda c: c[0])
+        for _, pt in cuts:
+            if not seq or math.hypot(pt[0] - seq[-1][0], pt[1] - seq[-1][1]) > 1e-9:
+                seq.append(pt)
+
+    if len(seq) >= 2 and math.hypot(seq[0][0] - seq[-1][0], seq[0][1] - seq[-1][1]) <= 1e-9:
+        seq.pop()
+
+    npts = len(seq)
+    if npts < 2:
+        return [ring], True
+
+    keep: list[bool] = []
+    for k in range(npts):
+        a = seq[k]
+        b = seq[(k + 1) % npts]
+        mid = ((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5)
+        keep.append(not _point_in_any_ring(mid, others))
+
+    if all(keep):
+        return [ring], True
+    if not any(keep):
+        return [], False
+
+    start = 0
+    for k in range(npts):
+        if keep[k] and not keep[(k - 1) % npts]:
+            start = k
+            break
+
+    pieces: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = []
+    k = start
+    for _ in range(npts):
+        if keep[k]:
+            if not current:
+                current.append(seq[k])
+            current.append(seq[(k + 1) % npts])
+        elif current:
+            pieces.append(current)
+            current = []
+        k = (k + 1) % npts
+    if current:
+        pieces.append(current)
+
+    return pieces, False
 
 
 def _segments_intersect(
@@ -382,25 +517,32 @@ def generate_contour_offset_loops_multi(
     spacing: float,
     repetitions: int,
     invert_flags: list[bool] | None = None,
-) -> list[list[list[tuple[float, float]]]]:
+) -> list[list[tuple[list[tuple[float, float]], bool]]]:
     """Generate concentric offset loops for multiple polygons simultaneously.
 
-    When two polygons are close together (e.g. two nearby pads), their
-    isolation-routing offset loops can start to cross or overlap once the
-    offset distance grows large enough relative to the gap between them —
-    causing the laser to re-cut the same area on more than one pass
-    (overcutting). This mirrors how 3D-printing slicers stop adding
-    concentric perimeter shells once they would collide with a neighboring
-    feature: once a pair of polygons' loops overlap at a given offset step,
-    growth is stopped for both of them from that step onward, while the
-    earlier non-overlapping loops already generated are kept.
+    When two polygons are close together (e.g. two nearby pads, or a long
+    trace running near a pad for part of its length), growing each one's
+    isolation-routing offset independently can make their loops cross or
+    overlap once the offset distance exceeds the gap between them — causing
+    the laser to re-cut the same area on more than one pass (overcutting).
+
+    Rather than stopping a colliding polygon's growth entirely for every
+    future step (which would also erase loops far away from the actual
+    conflict, undercutting the rest of the shape), each step's offset ring is
+    trimmed *locally* with ``trim_ring_against_rings``: only the stretch that
+    actually intrudes into a neighboring polygon's same-step offset is cut
+    out, while the rest of the ring -- and every later step's ring in areas
+    with room to grow -- is kept intact. A ring that survives trimming
+    untouched is returned as ``(points, True)`` (still a closed loop); a
+    locally trimmed ring becomes one or more open paths, each returned as
+    ``(points, False)`` (see ``loop_to_segments``'s ``closed`` parameter).
 
     Polygons that already touch or overlap at their original (un-offset)
     position (e.g. a pad and the trace soldered to it, both part of the same
-    net) are exempted from colliding with each other: they are physically one
-    contiguous piece of copper, so their offset loops are expected to overlap
-    near the shared seam, and stopping their growth there would wrongly
-    delete the isolation routing around the whole feature.
+    net) are exempted from trimming against each other: they are physically
+    one contiguous piece of copper, so their offset loops are expected to
+    overlap near the shared seam, and cutting into either there would wrongly
+    remove isolation routing around the whole feature.
     """
     n_polys = len(polys)
     rings = [_to_ring(p) for p in polys]
@@ -410,7 +552,7 @@ def generate_contour_offset_loops_multi(
     same_island = _touching_groups(rings)
 
     active = [bool(r) for r in rings]
-    result: list[list[list[tuple[float, float]]]] = [[] for _ in range(n_polys)]
+    result: list[list[tuple[list[tuple[float, float]], bool]]] = [[] for _ in range(n_polys)]
 
     if start_offset < 0 or spacing < 0 or repetitions <= 0:
         return result
@@ -428,23 +570,31 @@ def generate_contour_offset_loops_multi(
                 continue
             step_rings[i] = offset_ring
 
-        collided: set[int] = set()
         bboxes: list[tuple[float, float, float, float] | None] = [
             _ring_bbox(r) if r is not None else None for r in step_rings
         ]
+        neighbor_rings: list[list[list[tuple[float, float]]]] = [[] for _ in range(n_polys)]
         for i, j in _candidate_overlap_pairs(bboxes):
             if same_island[i] == same_island[j]:
                 continue
             if _rings_overlap(step_rings[i], step_rings[j]):
-                collided.add(i)
-                collided.add(j)
+                neighbor_rings[i].append(step_rings[j])
+                neighbor_rings[j].append(step_rings[i])
 
         for i in range(n_polys):
-            if i in collided:
-                active[i] = False
+            ring_i = step_rings[i]
+            if ring_i is None:
                 continue
-            if step_rings[i] is not None:
-                result[i].append(step_rings[i])
+            others = neighbor_rings[i]
+            if not others:
+                result[i].append((ring_i, True))
+                continue
+            pieces, closed = trim_ring_against_rings(ring_i, others)
+            if closed:
+                if pieces:
+                    result[i].append((pieces[0], True))
+            else:
+                result[i].extend((piece, False) for piece in pieces)
 
     return result
 

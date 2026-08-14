@@ -24,7 +24,7 @@ KiCad plugin for converting PCB geometry into hatch lines or contour offsets for
   - Laser radius (inward offset)
   - Invert alternate-nesting parity for text-style hatching
 - Drill holes can use regular concentric contour loops (default) or inward spirals
-- Contour offsets automatically stop growing between nearby features (e.g. close pads) instead of overlapping and overcutting the material
+- Contour offsets automatically trim themselves locally where they'd meet a nearby feature (e.g. close pads, or a long trace passing near a pad) instead of overlapping and overcutting the material, without cutting short the rest of the contour away from the conflict
 - Export a DXF with hatch lines or offsets added on layer `HATCH_GEN`, or export every standard layer to its own DXF file with **Export All Layers...**
 
 ## Preferred Workflow

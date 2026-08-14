@@ -24,7 +24,7 @@ try:
         generate_contour_offset_loops_multi,
         is_back_layer,
         loop_to_segments,
-        mirror_rings_x,
+        mirror_ring_x,
         mirror_segments_x,
     )
 except ImportError:
@@ -32,7 +32,7 @@ except ImportError:
         generate_contour_offset_loops_multi,
         is_back_layer,
         loop_to_segments,
-        mirror_rings_x,
+        mirror_ring_x,
         mirror_segments_x,
     )
 
@@ -362,8 +362,8 @@ def build_kicad_drill_contour_geometry(
 
     segments: list[list[list[float]]] = []
     for hole_loops in loops_per_hole:
-        for loop in hole_loops:
-            segments.extend(loop_to_segments(loop))
+        for points, closed in hole_loops:
+            segments.extend(loop_to_segments(points, closed=closed))
 
     return circles, segments
 
@@ -581,7 +581,9 @@ def generate_contour_offset_dxf(
         for depth in depths
     ]
     loops_per_poly = generate_contour_offset_loops_multi(polys, start_offset, spacing, repetitions, invert_flags)
-    loops: list[list[tuple[float, float]]] = [loop for poly_loops in loops_per_poly for loop in poly_loops]
+    loops: list[tuple[list[tuple[float, float]], bool]] = [
+        piece for poly_loops in loops_per_poly for piece in poly_loops
+    ]
 
     if not loops:
         raise RuntimeError(
@@ -590,7 +592,7 @@ def generate_contour_offset_dxf(
         )
 
     if mirror_axis_mm is not None:
-        loops = mirror_rings_x(loops, mirror_axis_mm)
+        loops = [(mirror_ring_x(points, mirror_axis_mm), closed) for points, closed in loops]
 
     insunits = source_doc.header.get("$INSUNITS") if "$INSUNITS" in source_doc.header else None
     _write_loops_dxf(loops, output_dxf_path, layer_name, insunits=insunits)
@@ -598,7 +600,7 @@ def generate_contour_offset_dxf(
 
 
 def _write_loops_dxf(
-    loops: list[list[tuple[float, float]]],
+    loops: list[tuple[list[tuple[float, float]], bool]],
     output_dxf_path: Path,
     layer_name: str,
     insunits: int | None = None,
@@ -615,12 +617,13 @@ def _write_loops_dxf(
         out_doc.layers.new(layer_name, dxfattribs={"color": 1})
 
     msp = out_doc.modelspace()
-    for loop in loops:
-        if len(loop) < 3:
+    for points, closed in loops:
+        min_points = 3 if closed else 2
+        if len(points) < min_points:
             continue
         try:
-            closed_loop = list(loop) + [loop[0]]
-            msp.add_lwpolyline(closed_loop, close=False, dxfattribs={"layer": layer_name})
+            dxf_points = list(points) + [points[0]] if closed else list(points)
+            msp.add_lwpolyline(dxf_points, close=False, dxfattribs={"layer": layer_name})
         except Exception:
             continue
 
@@ -707,7 +710,7 @@ def preview_contour_offset_counts(
 
     invert_flags = [bool(depth % 2) if auto_alternate_direction else False for depth in depths]
     loops_per_poly = generate_contour_offset_loops_multi(polys, start_offset, spacing, repetitions, invert_flags)
-    loops: list[list[tuple[float, float]]] = [loop for poly_loops in loops_per_poly for loop in poly_loops]
+    loops = [piece for poly_loops in loops_per_poly for piece in poly_loops]
 
     return len(polys), len(loops)
 

@@ -1023,8 +1023,8 @@ def generate_contour_offsets_for_selection(
     for zone_loops in loops_per_zone:
         if zone_loops:
             used_zones += 1
-        for loop in zone_loops:
-            segments.extend(loop_to_segments(loop))
+        for points, closed in zone_loops:
+            segments.extend(loop_to_segments(points, closed=closed))
 
     min_seg_len = max(spacing * 0.02, 1e-6)
     segments, dropped_tiny, dropped_dupe = sanitize_segments(
@@ -1053,7 +1053,13 @@ def build_contour_loops_for_selection(
     offset_count: int,
     invert_offset_direction: bool = False,
     auto_alternate_direction: bool = True,
-) -> list[list[tuple[float, float]]]:
+) -> list[tuple[list[tuple[float, float]], bool]]:
+    """Returns a flat list of ``(points, closed)`` pairs -- ``closed`` is True
+    for an untouched (still fully closed) offset ring, and False for a path
+    that was locally trimmed against a nearby zone (see
+    ``generate_contour_offset_loops_multi``), which callers must render/write
+    as an open polyline rather than closing it back to its first point.
+    """
     zone_polys = build_zone_polygons(session.zone_map)
     normalized_ids = [str(z) for z in selected_ids]
     invert_flags = resolve_contour_invert_flags(
@@ -1063,7 +1069,7 @@ def build_contour_loops_for_selection(
     polys = [zone_polys[zid] for zid in valid_ids]
     flags = [invert_flags.get(zid, invert_offset_direction) for zid in valid_ids]
     loops_per_zone = generate_contour_offset_loops_multi(polys, start_offset, offset_spacing, offset_count, flags)
-    loops: list[list[tuple[float, float]]] = []
+    loops: list[tuple[list[tuple[float, float]], bool]] = []
     for zone_loops in loops_per_zone:
         loops.extend(zone_loops)
     return loops

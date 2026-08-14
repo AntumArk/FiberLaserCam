@@ -26,9 +26,14 @@ from __future__ import annotations
 from pathlib import Path
 
 try:
-    from contour_offsets import is_back_layer, mirror_rings_x  # noqa: F401
+    from contour_offsets import is_back_layer, mirror_ring_x, mirror_rings_x, trim_ring_against_rings  # noqa: F401
 except ImportError:
-    from kicad_plugin.contour_offsets import is_back_layer, mirror_rings_x  # noqa: F401
+    from kicad_plugin.contour_offsets import (  # noqa: F401
+        is_back_layer,
+        mirror_ring_x,
+        mirror_rings_x,
+        trim_ring_against_rings,
+    )
 
 Ring = list[tuple[float, float]]
 
@@ -285,7 +290,7 @@ def generate_contour_offsets_from_board(
     invert_direction: bool = False,
     auto_alternate_direction: bool = True,
     mirror_axis_mm: float | None = None,
-) -> list[Ring]:
+) -> list[tuple[Ring, bool]]:
     """Generate isolation-routing contour offset loops for one copper layer
     directly from a loaded pcbnew ``BOARD``, using KiCad's own Clipper-backed
     polygon engine (``Simplify`` + ``Inflate`` + ``BooleanIntersection``)
@@ -293,10 +298,9 @@ def generate_contour_offsets_from_board(
     ``contour_offsets.py``.
 
     Distances (``start_offset``, ``spacing``) are in millimetres, matching
-    the units used by the rest of the app. Returns a flat list of closed
-    rings (each a list of ``(x, y)`` mm point tuples), one per generated loop,
-    growth for a given net stopping as soon as it would collide with another
-    net's grown region at the same step (overcut prevention).
+    the units used by the rest of the app. Returns a flat list of
+    ``(ring, closed)`` pairs, one per generated loop/path -- see
+    ``generate_contour_offsets_from_net_polys`` for what ``closed`` means.
 
     ``mirror_axis_mm``, when given (e.g. from ``get_board_mirror_axis_mm``),
     mirrors every resulting loop's X coordinate across that axis -- pass this
@@ -324,12 +328,23 @@ def generate_contour_offsets_from_net_polys(
     invert_direction: bool = False,
     auto_alternate_direction: bool = True,
     mirror_axis_mm: float | None = None,
-) -> list[Ring]:
+) -> list[tuple[Ring, bool]]:
     """Same offsetting/overcut-prevention logic as
     ``generate_contour_offsets_from_board``, but operating on an
     already-built ``dict[net_code, SHAPE_POLY_SET]`` (e.g. reused across
     repeated preview/export calls instead of re-extracting it from the board
     every time, or a subset restricted to only the currently-selected nets).
+
+    When a net's grown region intrudes into another net's grown region at
+    the same step (overcutting risk), only the intruding *stretch* of its
+    boundary is trimmed out with ``trim_ring_against_rings`` -- growth is not
+    stopped for the whole net, so the rest of its boundary (and later steps
+    anywhere it still has room) keeps growing normally instead of being
+    undercut everywhere just because one small area got close to a neighbor.
+    Returns a flat list of ``(ring, closed)`` pairs: ``closed`` is True for a
+    ring that needed no trimming (still a full closed loop), and False for a
+    locally trimmed open path -- callers must not close it back to its first
+    point (see ``contour_offsets.loop_to_segments``'s ``closed`` parameter).
 
     ``mirror_axis_mm``, when given, mirrors every resulting loop's X
     coordinate across that axis (see ``generate_contour_offsets_from_board``).
@@ -352,33 +367,44 @@ def generate_contour_offsets_from_net_polys(
         sign = -1.0 if invert else 1.0
         return sign * (start_offset + spacing * step)
 
-    all_loops: list[Ring] = []
+    active = {code: True for code in net_codes}
+    all_loops: list[tuple[Ring, bool]] = []
 
-    for net_code in net_codes:
-        base_poly = net_polys[net_code]
-
-        for step in range(repetitions):
-            grown = _grown_polygon(pcbnew, base_poly, signed_distance(net_code, step), error_iu)
+    for step in range(repetitions):
+        grown_by_net = {}
+        for net_code in net_codes:
+            if not active[net_code]:
+                continue
+            grown = _grown_polygon(pcbnew, net_polys[net_code], signed_distance(net_code, step), error_iu)
             if grown.OutlineCount() == 0:
-                break
+                active[net_code] = False
+                continue
+            grown_by_net[net_code] = grown
 
-            collides = False
-            for other_code in net_codes:
-                if other_code == net_code:
+        codes_this_step = list(grown_by_net.keys())
+        neighbor_rings: dict[int, list[Ring]] = {code: [] for code in codes_this_step}
+        for a_idx in range(len(codes_this_step)):
+            code_a = codes_this_step[a_idx]
+            for b_idx in range(a_idx + 1, len(codes_this_step)):
+                code_b = codes_this_step[b_idx]
+                if _polysets_intersect(pcbnew, grown_by_net[code_a], grown_by_net[code_b]):
+                    neighbor_rings[code_a].extend(polyset_to_rings(grown_by_net[code_b]))
+                    neighbor_rings[code_b].extend(polyset_to_rings(grown_by_net[code_a]))
+
+        for net_code in codes_this_step:
+            others = neighbor_rings[net_code]
+            for ring in polyset_to_rings(grown_by_net[net_code]):
+                if not others:
+                    all_loops.append((ring, True))
                     continue
-                other_grown = _grown_polygon(
-                    pcbnew, net_polys[other_code], signed_distance(other_code, step), error_iu
-                )
-                if _polysets_intersect(pcbnew, grown, other_grown):
-                    collides = True
-                    break
-
-            if collides:
-                break
-
-            all_loops.extend(polyset_to_rings(grown))
+                pieces, closed = trim_ring_against_rings(ring, others)
+                if closed:
+                    if pieces:
+                        all_loops.append((pieces[0], True))
+                else:
+                    all_loops.extend((piece, False) for piece in pieces)
 
     if mirror_axis_mm is not None:
-        all_loops = mirror_rings_x(all_loops, mirror_axis_mm)
+        all_loops = [(mirror_ring_x(ring, mirror_axis_mm), closed) for ring, closed in all_loops]
 
     return all_loops

@@ -26,7 +26,7 @@ from app_geometry import (
     sanitize_segments,
 )
 from app_sessions import UploadSession
-from contour_offsets import is_back_layer, loop_to_segments, mirror_rings_x, mirror_segments_x
+from contour_offsets import is_back_layer, loop_to_segments, mirror_ring_x, mirror_segments_x
 
 
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -676,8 +676,8 @@ def _generate_preview_segments(
                 mirror_axis_mm=mirror_axis_mm,
             )
             segments: list[list[list[float]]] = []
-            for loop in loops:
-                segments.extend(loop_to_segments(loop))
+            for points, closed in loops:
+                segments.extend(loop_to_segments(points, closed=closed))
             min_seg_len = max(offset_spacing * 0.02, 1e-6)
             segments, _dropped_tiny, _dropped_dupe = sanitize_segments(
                 segments, min_length=min_seg_len, quant_grid=1e-5
@@ -812,7 +812,7 @@ def _generate_export_dxf_bytes(
                 auto_alternate_direction=auto_alternate_direction,
             )
             if mirror_axis_mm is not None:
-                loops = mirror_rings_x(loops, mirror_axis_mm)
+                loops = [(mirror_ring_x(points, mirror_axis_mm), closed) for points, closed in loops]
     else:
         segments = _generate_preview_segments(
             session,
@@ -838,15 +838,16 @@ def _generate_export_dxf_bytes(
 
     modelspace = doc.modelspace()
     if mode == "contour_offsets":
-        for loop in loops:
-            if len(loop) < 3:
+        for points, closed in loops:
+            min_points = 3 if closed else 2
+            if len(points) < min_points:
                 continue
             try:
-                closed_loop = list(loop) + [loop[0]]
-                modelspace.add_lwpolyline(closed_loop, close=False, dxfattribs={"layer": layer_name})
+                dxf_points = list(points) + [points[0]] if closed else list(points)
+                modelspace.add_lwpolyline(dxf_points, close=False, dxfattribs={"layer": layer_name})
             except Exception:
-                closed_loop = list(loop) + [loop[0]]
-                modelspace.add_polyline2d(closed_loop, close=False, dxfattribs={"layer": layer_name})
+                dxf_points = list(points) + [points[0]] if closed else list(points)
+                modelspace.add_polyline2d(dxf_points, close=False, dxfattribs={"layer": layer_name})
     else:
         for seg in segments:
             p1, p2 = seg
