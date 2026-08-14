@@ -166,6 +166,29 @@ def _rotate_point(x: float, y: float, angle_deg: float) -> tuple[float, float]:
 
 
 def _collect_kicad_drill_holes(board_path: Path) -> list[tuple[float, float, float]]:
+    """Collect (x_mm, y_mm, diameter_mm) for every drilled hole on the board
+    (through-hole pads and vias, the latter treated as plain round
+    through-holes).
+
+    When the ``pcbnew`` module is importable (the live GUI plugin, or the
+    AppImage/CLI running through KiCad's own bundled Python), this loads the
+    board with pcbnew and reads each hole's already-resolved absolute
+    position directly from KiCad's own data model -- see
+    ``pcbnew_geometry.get_drill_holes_from_board``. This is the accurate
+    path: it can't get footprint rotation/mirroring wrong the way manually
+    re-deriving pad positions from the raw text can.
+
+    Falls back to a plain-text regex parse of the ``.kicad_pcb`` file (see
+    ``_collect_kicad_drill_holes_from_text``) when ``pcbnew`` isn't
+    importable, e.g. a bare host Python without a KiCad install.
+    """
+    if pcbnew_geometry.is_pcbnew_available():
+        board = pcbnew_geometry.load_board(board_path)
+        return pcbnew_geometry.get_drill_holes_from_board(board)
+    return _collect_kicad_drill_holes_from_text(board_path)
+
+
+def _collect_kicad_drill_holes_from_text(board_path: Path) -> list[tuple[float, float, float]]:
     text = board_path.read_text(encoding="utf-8", errors="replace")
     holes: list[tuple[float, float, float]] = []
 

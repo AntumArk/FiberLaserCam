@@ -79,6 +79,70 @@ class PcbnewGeometryTests(unittest.TestCase):
         for loop in loops:
             self.assertGreaterEqual(len(loop), 3)
 
+    def test_get_drill_holes_from_board_uses_pad_resolved_position(self):
+        """A pad's hole position must come from pcbnew's own resolved
+        absolute position (footprint position + rotation + mirroring already
+        applied), not a hand-rolled re-derivation of the local pad offset."""
+        import pcbnew
+
+        board = pcbnew.BOARD()
+        fp = pcbnew.FOOTPRINT(board)
+        fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(10), pcbnew.FromMM(5)))
+        fp.SetOrientationDegrees(90)
+        board.Add(fp)
+
+        net = pcbnew.NETINFO_ITEM(board, "net1", 1)
+        pad = pcbnew.PAD(fp)
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_PTH)
+        pad.SetSize(pcbnew.VECTOR2I(pcbnew.FromMM(1.5), pcbnew.FromMM(1.5)))
+        pad.SetShape(pcbnew.PAD_SHAPE_CIRCLE)
+        pad.SetDrillSize(pcbnew.VECTOR2I(pcbnew.FromMM(0.8), pcbnew.FromMM(0.8)))
+        # Pad offset 1mm to the "right" of the footprint origin, before the
+        # footprint's own 90-degree rotation is applied.
+        pad.SetFPRelativePosition(pcbnew.VECTOR2I(pcbnew.FromMM(1), 0))
+        pad.SetNet(net)
+        fp.Add(pad)
+
+        holes = pg.get_drill_holes_from_board(board)
+        self.assertEqual(len(holes), 1)
+        x, y, diameter = holes[0]
+        expected_x, expected_y = pcbnew.ToMM(pad.GetPosition().x), pcbnew.ToMM(pad.GetPosition().y)
+        self.assertAlmostEqual(x, expected_x, places=6)
+        self.assertAlmostEqual(y, expected_y, places=6)
+        self.assertAlmostEqual(diameter, 0.8, places=6)
+
+    def test_get_drill_holes_from_board_includes_vias_as_through_holes(self):
+        import pcbnew
+
+        board = pcbnew.BOARD()
+        via = pcbnew.PCB_VIA(board)
+        via.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(20), pcbnew.FromMM(30)))
+        via.SetDrill(pcbnew.FromMM(0.4))
+        board.Add(via)
+
+        holes = pg.get_drill_holes_from_board(board)
+        self.assertEqual(len(holes), 1)
+        x, y, diameter = holes[0]
+        self.assertAlmostEqual(x, 20.0, places=6)
+        self.assertAlmostEqual(y, 30.0, places=6)
+        self.assertAlmostEqual(diameter, 0.4, places=6)
+
+    def test_get_drill_holes_from_board_skips_smd_pads(self):
+        import pcbnew
+
+        board = pcbnew.BOARD()
+        fp = pcbnew.FOOTPRINT(board)
+        board.Add(fp)
+        pad = pcbnew.PAD(fp)
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        pad.SetSize(pcbnew.VECTOR2I(pcbnew.FromMM(1.0), pcbnew.FromMM(1.0)))
+        pad.SetShape(pcbnew.PAD_SHAPE_RECTANGLE)
+        pad.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(3), pcbnew.FromMM(4)))
+        fp.Add(pad)
+
+        holes = pg.get_drill_holes_from_board(board)
+        self.assertEqual(holes, [])
+
 
 if __name__ == "__main__":
     unittest.main()

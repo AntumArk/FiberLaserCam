@@ -171,6 +171,52 @@ def _net_nesting_depths(net_polys: dict[int, object]) -> dict[int, int]:
     return depths
 
 
+def get_drill_holes_from_board(board) -> list[tuple[float, float, float]]:
+    """Extract every drilled through-hole from a loaded board using pcbnew's
+    own resolved geometry, instead of re-parsing the raw ``.kicad_pcb`` text
+    and re-deriving each pad's footprint-relative position/rotation by hand.
+
+    ``pad.GetPosition()`` already returns the pad's absolute board-space
+    position with the footprint's own position, rotation, and mirroring
+    (back-side footprints) fully applied by KiCad -- so this avoids the
+    coordinate-shift bugs that come from re-implementing that transform
+    (e.g. for rotated or back-side footprints) in plain Python/regex.
+
+    Vias are included and treated the same as through-hole pads (plain
+    drilled round holes at their center position), matching how they are
+    physically drilled on the board.
+
+    Returns a de-duplicated list of ``(x_mm, y_mm, diameter_mm)`` tuples.
+    """
+    pcbnew = _pcbnew()
+    holes: list[tuple[float, float, float]] = []
+
+    for pad in board.GetPads():
+        if not pad.HasHole():
+            continue
+        diameter = max(pcbnew.ToMM(pad.GetDrillSizeX()), pcbnew.ToMM(pad.GetDrillSizeY()))
+        if diameter <= 0:
+            continue
+        pos = pad.GetPosition()
+        holes.append((pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y), diameter))
+
+    for track in board.GetTracks():
+        if track.Type() != pcbnew.PCB_VIA_T:
+            continue
+        diameter = pcbnew.ToMM(track.GetDrillValue())
+        if diameter <= 0:
+            continue
+        pos = track.GetPosition()
+        holes.append((pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y), diameter))
+
+    unique: dict[tuple[float, float, float], tuple[float, float, float]] = {}
+    for x, y, d in holes:
+        key = (round(x, 4), round(y, 4), round(d, 4))
+        unique[key] = (x, y, d)
+
+    return list(unique.values())
+
+
 def generate_contour_offsets_from_board(
     board,
     layer_name: str,
