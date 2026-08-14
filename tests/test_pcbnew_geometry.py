@@ -106,7 +106,9 @@ class PcbnewGeometryTests(unittest.TestCase):
         holes = pg.get_drill_holes_from_board(board)
         self.assertEqual(len(holes), 1)
         x, y, diameter = holes[0]
-        expected_x, expected_y = pcbnew.ToMM(pad.GetPosition().x), pcbnew.ToMM(pad.GetPosition().y)
+        # Y is negated relative to pad.GetPosition() to match KiCad's own
+        # DXF-export coordinate convention -- see get_drill_holes_from_board.
+        expected_x, expected_y = pcbnew.ToMM(pad.GetPosition().x), -pcbnew.ToMM(pad.GetPosition().y)
         self.assertAlmostEqual(x, expected_x, places=6)
         self.assertAlmostEqual(y, expected_y, places=6)
         self.assertAlmostEqual(diameter, 0.8, places=6)
@@ -124,7 +126,7 @@ class PcbnewGeometryTests(unittest.TestCase):
         self.assertEqual(len(holes), 1)
         x, y, diameter = holes[0]
         self.assertAlmostEqual(x, 20.0, places=6)
-        self.assertAlmostEqual(y, 30.0, places=6)
+        self.assertAlmostEqual(y, -30.0, places=6)
         self.assertAlmostEqual(diameter, 0.4, places=6)
 
     def test_get_drill_holes_from_board_skips_smd_pads(self):
@@ -166,6 +168,48 @@ class PcbnewGeometryTests(unittest.TestCase):
         board = pcbnew.BOARD()
         span = pg.get_board_x_span_mm(board)
         self.assertIsNone(span)
+
+    def test_get_board_mirror_axis_mm_returns_bbox_center(self):
+        import pcbnew
+
+        board = pcbnew.BOARD()
+        shape = pcbnew.PCB_SHAPE(board)
+        shape.SetShape(pcbnew.SHAPE_T_RECT)
+        shape.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(0), pcbnew.FromMM(0)))
+        shape.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(20), pcbnew.FromMM(10)))
+        shape.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(shape)
+
+        axis = pg.get_board_mirror_axis_mm(board)
+        self.assertIsNotNone(axis)
+        self.assertAlmostEqual(axis, 10.0, delta=0.2)
+
+    def test_get_board_mirror_axis_mm_returns_none_without_edge_cuts(self):
+        import pcbnew
+
+        board = pcbnew.BOARD()
+        self.assertIsNone(pg.get_board_mirror_axis_mm(board))
+
+    def test_generate_contour_offsets_from_board_mirrors_back_layer(self):
+        """Passing mirror_axis_mm should mirror every generated loop's X
+        coordinate across that axis (Y unchanged) -- used for B.Cu/B.Mask so
+        the output lines up once the board is physically flipped over."""
+        board = self._make_board()
+        axis = 2.5
+
+        plain_loops = pg.generate_contour_offsets_from_board(
+            board, "F.Cu", start_offset=0.1, spacing=0.1, repetitions=1
+        )
+        mirrored_loops = pg.generate_contour_offsets_from_board(
+            board, "F.Cu", start_offset=0.1, spacing=0.1, repetitions=1, mirror_axis_mm=axis
+        )
+
+        self.assertEqual(len(plain_loops), len(mirrored_loops))
+        for plain, mirrored in zip(plain_loops, mirrored_loops):
+            self.assertEqual(len(plain), len(mirrored))
+            for (px, py), (mx, my) in zip(plain, mirrored):
+                self.assertAlmostEqual(mx, 2.0 * axis - px, places=6)
+                self.assertAlmostEqual(my, py, places=6)
 
 
 if __name__ == "__main__":

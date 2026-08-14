@@ -20,11 +20,20 @@ from app_geometry import (
 from app_sessions import UploadSession
 
 try:
-    from contour_offsets import generate_contour_offset_loops_multi, loop_to_segments
+    from contour_offsets import (
+        generate_contour_offset_loops_multi,
+        is_back_layer,
+        loop_to_segments,
+        mirror_rings_x,
+        mirror_segments_x,
+    )
 except ImportError:
     from kicad_plugin.contour_offsets import (
         generate_contour_offset_loops_multi,
+        is_back_layer,
         loop_to_segments,
+        mirror_rings_x,
+        mirror_segments_x,
     )
 
 try:
@@ -176,45 +185,23 @@ def _collect_kicad_drill_holes(board_path: Path) -> list[tuple[float, float, flo
     position directly from KiCad's own data model -- see
     ``pcbnew_geometry.get_drill_holes_from_board``. This is the accurate
     path: it can't get footprint rotation/mirroring wrong the way manually
-    re-deriving pad positions from the raw text can.
+    re-deriving pad positions from the raw text can. Y is negated there to
+    match KiCad's own DXF-export coordinate convention (see
+    ``pcbnew_geometry._contour_to_ring``); the plain-text fallback below
+    negates Y itself for the same reason.
 
     Falls back to a plain-text regex parse of the ``.kicad_pcb`` file (see
     ``_collect_kicad_drill_holes_from_text``) when ``pcbnew`` isn't
     importable, e.g. a bare host Python without a KiCad install.
 
-    Hole X positions are mirrored left/right across the board's own
-    footprint (see ``_mirror_holes_x``) so drilling happens in the same
-    physical board orientation as F.Cu isolation routing, without having to
-    flip the board over between the two passes.
+    Drilling is done in the same (front, unflipped) orientation shown in the
+    PCB editor, so hole X positions are never mirrored here (unlike back-side
+    copper/mask layers -- see ``_resolve_mirror_axis_mm``).
     """
     if pcbnew_geometry.is_pcbnew_available():
         board = pcbnew_geometry.load_board(board_path)
-        holes = pcbnew_geometry.get_drill_holes_from_board(board)
-        return _mirror_holes_x(holes, board)
-    return _mirror_holes_x(_collect_kicad_drill_holes_from_text(board_path))
-
-
-def _mirror_holes_x(
-    holes: list[tuple[float, float, float]], board=None
-) -> list[tuple[float, float, float]]:
-    """Mirror each hole's X position across the board's own Edge.Cuts extent
-    (or, lacking a board, across the hole set's own bounding box), so the
-    drilled pattern lands correctly when drilling on the same physical side/
-    orientation used for F.Cu isolation routing instead of the flipped
-    orientation the raw board coordinates assume."""
-    if not holes:
-        return holes
-
-    axis = None
-    if board is not None:
-        span = pcbnew_geometry.get_board_x_span_mm(board)
-        if span is not None:
-            axis = (span[0] + span[1]) / 2.0
-    if axis is None:
-        xs = [x for x, _y, _d in holes]
-        axis = (min(xs) + max(xs)) / 2.0
-
-    return [(2.0 * axis - x, y, d) for x, y, d in holes]
+        return pcbnew_geometry.get_drill_holes_from_board(board)
+    return [(x, -y, d) for x, y, d in _collect_kicad_drill_holes_from_text(board_path)]
 
 
 def _collect_kicad_drill_holes_from_text(board_path: Path) -> list[tuple[float, float, float]]:
@@ -483,6 +470,66 @@ def _export_kicad_to_dxf(source_path: Path, output_dxf_path: Path, layers: str |
         raise RuntimeError("kicad-cli finished but no DXF output file was produced.")
 
 
+_EDGE_CUTS_GRAPHIC_KEYWORDS = ("gr_line", "gr_rect", "gr_arc", "gr_circle", "gr_poly", "gr_curve")
+_COORD_PAIR_RE = re.compile(
+    r"\(\s*(?:start|end|center|mid|xy)\s+"
+    r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*\)"
+)
+
+
+def _board_edge_cuts_x_center_from_text(board_path: Path) -> float | None:
+    """Regex-based fallback for ``pcbnew_geometry.get_board_mirror_axis_mm``,
+    used when ``pcbnew`` isn't importable: parse every graphic item on the
+    ``Edge.Cuts`` layer directly out of the raw ``.kicad_pcb`` text and
+    return the X-center of their combined bounding box."""
+    text = board_path.read_text(encoding="utf-8", errors="replace")
+    xs: list[float] = []
+    for keyword in _EDGE_CUTS_GRAPHIC_KEYWORDS:
+        for block in _extract_balanced_blocks(text, keyword):
+            if "Edge.Cuts" not in block:
+                continue
+            for m in _COORD_PAIR_RE.finditer(block):
+                xs.append(float(m.group(1)))
+    if not xs:
+        return None
+    return (min(xs) + max(xs)) / 2.0
+
+
+def _resolve_board_mirror_axis_mm(source_path: Path) -> float | None:
+    """Resolve the X (mm) mirror axis for back-side layers from a KiCad
+    board/project source: the board's own Edge.Cuts bounding-box center,
+    read via ``pcbnew`` when importable, else parsed out of the raw
+    ``.kicad_pcb`` text. Returns None if neither is available."""
+    try:
+        board_path = _resolve_board_path(source_path)
+    except RuntimeError:
+        return None
+
+    if pcbnew_geometry.is_pcbnew_available():
+        board = pcbnew_geometry.load_board(board_path)
+        return pcbnew_geometry.get_board_mirror_axis_mm(board)
+    return _board_edge_cuts_x_center_from_text(board_path)
+
+
+def resolve_mirror_axis_mm(source_path: Path, layer_name: str) -> float | None:
+    """Resolve the X (mm) axis to mirror ``layer_name``'s geometry across, or
+    None if no mirroring is needed/possible.
+
+    Only back-side layers (``B.Cu``, ``B.Mask``, etc. -- see
+    ``contour_offsets.is_back_layer``) need mirroring: physically flipping
+    the board left/right to work on its back side means their exported
+    geometry must be mirrored across the board's own Edge.Cuts bbox center to
+    stay aligned with front-side layers and drill holes, since neither
+    kicad-cli's DXF export nor this app's pcbnew-native geometry source
+    mirror back layers on their own. Front-side layers, Edge.Cuts itself, and
+    drill holes are left untouched (drilling is done in the same unflipped
+    orientation as F.Cu isolation routing).
+    """
+    if not is_back_layer(layer_name):
+        return None
+    return _resolve_board_mirror_axis_mm(source_path)
+
+
 def _detect_input_kind(source_path: Path, input_format: str) -> str:
     if input_format in ("dxf", "kicad"):
         return input_format
@@ -519,6 +566,7 @@ def generate_contour_offset_dxf(
     layer_name: str = "F.Cu",
     invert_direction: bool = False,
     auto_alternate_direction: bool = True,
+    mirror_axis_mm: float | None = None,
 ) -> tuple[int, int]:
     source_doc = ezdxf.readfile(str(source_dxf_path))
     polys = _collect_polygons_from_dxf(source_doc)
@@ -540,6 +588,9 @@ def generate_contour_offset_dxf(
             "No contour loops generated from source DXF. "
             "Check selected export layers and contour parameters."
         )
+
+    if mirror_axis_mm is not None:
+        loops = mirror_rings_x(loops, mirror_axis_mm)
 
     insunits = source_doc.header.get("$INSUNITS") if "$INSUNITS" in source_doc.header else None
     _write_loops_dxf(loops, output_dxf_path, layer_name, insunits=insunits)
@@ -596,6 +647,11 @@ def generate_contour_offset_dxf_from_board(
     exporting to DXF and re-parsing it. Requires ``pcbnew`` to be importable
     (raises ``RuntimeError`` otherwise); callers should fall back to
     ``generate_contour_offset_dxf`` when it is not available.
+
+    Back-side layers (``B.Cu``, ``B.Mask``, etc.) are automatically mirrored
+    across the board's own Edge.Cuts bbox center (see
+    ``pcbnew_geometry.get_board_mirror_axis_mm``) so the output lines up once
+    the board is physically flipped over.
     """
     if not pcbnew_geometry.is_pcbnew_available():
         raise RuntimeError(
@@ -609,6 +665,10 @@ def generate_contour_offset_dxf_from_board(
     layer_id = pcbnew_geometry.resolve_layer_id(board, layer_name)
     net_count = len(pcbnew_geometry.build_net_polygons_for_layer(board, layer_id))
 
+    mirror_axis_mm = (
+        pcbnew_geometry.get_board_mirror_axis_mm(board) if is_back_layer(layer_name) else None
+    )
+
     loops = pcbnew_geometry.generate_contour_offsets_from_board(
         board,
         layer_name,
@@ -617,6 +677,7 @@ def generate_contour_offset_dxf_from_board(
         repetitions,
         invert_direction=invert_direction,
         auto_alternate_direction=auto_alternate_direction,
+        mirror_axis_mm=mirror_axis_mm,
     )
 
     if not loops:
@@ -662,6 +723,7 @@ def generate_hatch_dxf(
     alternate_nesting_hatch: bool = False,
     invert_alternate_nesting: bool = False,
     multi_angle_hatch: bool = False,
+    mirror_axis_mm: float | None = None,
 ) -> tuple[int, int]:
     zones, zone_map = build_zone_payload_from_dxf_path(str(source_dxf_path))
     session = UploadSession(
@@ -691,6 +753,9 @@ def generate_hatch_dxf(
             "No hatch segments generated from source DXF. "
             "Check selected export layers and hatch parameters."
         )
+
+    if mirror_axis_mm is not None:
+        segments = mirror_segments_x(segments, mirror_axis_mm)
 
     source_doc = ezdxf.readfile(str(source_dxf_path))
     out_doc = ezdxf.new(getattr(source_doc, "dxfversion", "R2010") or "R2010")
@@ -906,6 +971,7 @@ def run_export_all(source: Path, config_path: Path, output_dir: Path) -> list[st
             continue
 
         with _prepared_input_dxf(source, "kicad", layer) as source_dxf_path:
+            mirror_axis_mm = resolve_mirror_axis_mm(source, layer)
             if mode == "hatch":
                 generate_hatch_dxf(
                     source_dxf_path,
@@ -918,6 +984,7 @@ def run_export_all(source: Path, config_path: Path, output_dir: Path) -> list[st
                     alternate_nesting_hatch=bool(entry.get("alternate_nesting", False)),
                     invert_alternate_nesting=bool(entry.get("invert_alternate_nesting", False)),
                     multi_angle_hatch=bool(entry.get("multi_angle", False)),
+                    mirror_axis_mm=mirror_axis_mm,
                 )
             else:
                 generate_contour_offset_dxf(
@@ -929,6 +996,7 @@ def run_export_all(source: Path, config_path: Path, output_dir: Path) -> list[st
                     layer_name=layer,
                     invert_direction=bool(entry.get("invert", False)),
                     auto_alternate_direction=bool(entry.get("auto_alternate", True)),
+                    mirror_axis_mm=mirror_axis_mm,
                 )
         written.append(str(output_path))
 
@@ -987,6 +1055,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         with _prepared_input_dxf(args.source, args.input_format, args.kicad_layers) as source_dxf_path:
+            mirror_axis_mm = (
+                resolve_mirror_axis_mm(args.source, args.layer_name)
+                if _detect_input_kind(args.source, args.input_format) == "kicad"
+                else None
+            )
             if args.mode == "hatch":
                 polys, count = generate_hatch_dxf(
                     source_dxf_path,
@@ -997,6 +1070,7 @@ def main(argv: list[str] | None = None) -> int:
                     alternate_nesting_hatch=args.alternate_nesting,
                     invert_alternate_nesting=args.invert_alternate_nesting,
                     multi_angle_hatch=args.multi_angle,
+                    mirror_axis_mm=mirror_axis_mm,
                 )
                 print(f"source polygons: {polys}, generated hatch segments: {count} -> {args.output_dxf}")
             else:
@@ -1009,6 +1083,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.layer_name,
                     args.invert,
                     auto_alternate_direction=not args.no_auto_alternate,
+                    mirror_axis_mm=mirror_axis_mm,
                 )
                 print(f"source polygons: {polys}, generated loops: {count} -> {args.output_dxf}")
     except Exception as exc:

@@ -26,7 +26,7 @@ from app_geometry import (
     sanitize_segments,
 )
 from app_sessions import UploadSession
-from contour_offsets import loop_to_segments
+from contour_offsets import is_back_layer, loop_to_segments, mirror_rings_x, mirror_segments_x
 
 
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -607,12 +607,30 @@ def _selected_net_polys(selected_ids, pcbnew_ctx: dict[str, object] | None) -> d
     return {code: net_polys[code] for code in net_codes if code in net_polys}
 
 
+def _mirror_axis_for_layer(kicad_layer_name: str | None) -> float | None:
+    """Resolve the X (mm) axis to mirror ``kicad_layer_name``'s geometry
+    across, or None if no mirroring applies.
+
+    Only back-side layers (``B.Cu``, ``B.Mask``, etc.) need mirroring, across
+    the live board's own Edge.Cuts bbox center, so the preview and exported
+    DXF line up with the board once physically flipped over to work on its
+    back side (see ``pcbnew_geometry.get_board_mirror_axis_mm``). The live
+    GUI plugin always has ``pcbnew`` available (it runs inside KiCad), so
+    this works regardless of whether "Use pcbnew-native geometry" is
+    checked for the current layer.
+    """
+    if not kicad_layer_name or not is_back_layer(kicad_layer_name):
+        return None
+    return pcbnew_geometry.get_board_mirror_axis_mm(pcbnew.GetBoard())
+
+
 def _generate_preview_segments(
     session: UploadSession,
     payload: dict[str, object],
     *,
     outer_only_override: bool | None = None,
     pcbnew_ctx: dict[str, object] | None = None,
+    kicad_layer_name: str | None = None,
 ) -> list[list[list[float]]]:
     selected_ids = payload.get("selectedIds") or []
     mode = str(payload.get("mode", "hatch"))
@@ -637,6 +655,8 @@ def _generate_preview_segments(
         )
         return segments
 
+    mirror_axis_mm = _mirror_axis_for_layer(kicad_layer_name)
+
     if mode == "contour_offsets":
         start_offset = float(payload.get("offsetStart", 0.2))
         offset_spacing = float(payload.get("offsetSpacing", 0.2))
@@ -653,6 +673,7 @@ def _generate_preview_segments(
                 offset_count,
                 invert_direction=invert_offset_direction,
                 auto_alternate_direction=auto_alternate_direction,
+                mirror_axis_mm=mirror_axis_mm,
             )
             segments: list[list[list[float]]] = []
             for loop in loops:
@@ -672,6 +693,8 @@ def _generate_preview_segments(
             invert_offset_direction=invert_offset_direction,
             auto_alternate_direction=auto_alternate_direction,
         )
+        if mirror_axis_mm is not None:
+            segments = mirror_segments_x(segments, mirror_axis_mm)
         return segments
 
     angle = float(payload.get("angle", 45))
@@ -705,6 +728,8 @@ def _generate_preview_segments(
         invert_alternate_nesting,
         multi_angle_hatch,
     )
+    if mirror_axis_mm is not None:
+        segments = mirror_segments_x(segments, mirror_axis_mm)
     return segments
 
 
@@ -714,6 +739,7 @@ def _generate_export_dxf_bytes(
     *,
     outer_only_override: bool | None = None,
     pcbnew_ctx: dict[str, object] | None = None,
+    kicad_layer_name: str | None = None,
 ) -> bytes:
     selected_ids = payload.get("selectedIds") or []
     mode = str(payload.get("mode", "hatch"))
@@ -755,6 +781,8 @@ def _generate_export_dxf_bytes(
         doc.write(stream)
         return stream.getvalue().encode("utf-8")
 
+    mirror_axis_mm = _mirror_axis_for_layer(kicad_layer_name)
+
     if mode == "contour_offsets":
         start_offset = float(payload.get("offsetStart", 0.2))
         offset_spacing = float(payload.get("offsetSpacing", 0.2))
@@ -771,6 +799,7 @@ def _generate_export_dxf_bytes(
                 offset_count,
                 invert_direction=invert_offset_direction,
                 auto_alternate_direction=auto_alternate_direction,
+                mirror_axis_mm=mirror_axis_mm,
             )
         else:
             loops = build_contour_loops_for_selection(
@@ -782,8 +811,15 @@ def _generate_export_dxf_bytes(
                 invert_offset_direction=invert_offset_direction,
                 auto_alternate_direction=auto_alternate_direction,
             )
+            if mirror_axis_mm is not None:
+                loops = mirror_rings_x(loops, mirror_axis_mm)
     else:
-        segments = _generate_preview_segments(session, payload, outer_only_override=outer_only_override)
+        segments = _generate_preview_segments(
+            session,
+            payload,
+            outer_only_override=outer_only_override,
+            kicad_layer_name=kicad_layer_name,
+        )
         loops = []
 
     source_doc = ezdxf.readfile(session.path)
@@ -1331,7 +1367,9 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             return
 
         try:
-            segments = _generate_preview_segments(self.session, payload, pcbnew_ctx=self._pcbnew_ctx)
+            segments = _generate_preview_segments(
+                self.session, payload, pcbnew_ctx=self._pcbnew_ctx, kicad_layer_name=self._current_layer()
+            )
         except Exception as exc:
             self.status_lbl.SetLabel(f"Preview failed: {exc}")
             self.canvas.set_data(self.zone_map, set(self._selected_ids()), [])
@@ -1362,7 +1400,9 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
             )
 
         try:
-            body = _generate_export_dxf_bytes(export_session, payload, pcbnew_ctx=self._pcbnew_ctx)
+            body = _generate_export_dxf_bytes(
+                export_session, payload, pcbnew_ctx=self._pcbnew_ctx, kicad_layer_name=self._current_layer()
+            )
         except Exception as exc:
             _message("Fiber Laser Export", f"Export failed: {exc}", wx.OK | wx.ICON_ERROR)
             return
@@ -1420,7 +1460,9 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
                     use_pcbnew=bool(settings.get("usePcbnewGeometry", False)),
                 )
                 payload = _payload_from_settings(settings, board_path=self.board_path, selected_ids=zone_ids)
-                dxf_bytes = _generate_export_dxf_bytes(session, payload, pcbnew_ctx=pcbnew_ctx)
+                dxf_bytes = _generate_export_dxf_bytes(
+                    session, payload, pcbnew_ctx=pcbnew_ctx, kicad_layer_name=layer
+                )
             except Exception as exc:
                 errors.append(f"{layer}: {exc}")
                 continue

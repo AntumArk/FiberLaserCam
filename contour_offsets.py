@@ -166,6 +166,38 @@ def generate_contour_offset_loops(
     return loops
 
 
+def is_back_layer(layer_name: str) -> bool:
+    """Return True for KiCad "back side" layers (``B.Cu``, ``B.Mask``,
+    ``B.SilkS``, etc.) -- anything whose short layer-name prefix is ``B.``.
+
+    Used to decide which exported layers need to be mirrored left/right (see
+    ``mirror_rings_x`` / ``mirror_segments_x``) so the physical geometry lines
+    up when the board is flipped over to work on its back side, since neither
+    KiCad's DXF export (``kicad-cli``) nor the pcbnew-native geometry source
+    in this app mirror back layers on their own.
+    """
+    return layer_name.strip().upper().startswith("B.")
+
+
+def mirror_ring_x(ring: list[tuple[float, float]], axis_x: float) -> list[tuple[float, float]]:
+    """Mirror a single ring's X coordinates across ``axis_x`` (Y unchanged)."""
+    return [(2.0 * axis_x - x, y) for x, y in ring]
+
+
+def mirror_rings_x(
+    rings: list[list[tuple[float, float]]], axis_x: float
+) -> list[list[tuple[float, float]]]:
+    """Mirror a list of rings' X coordinates across ``axis_x``."""
+    return [mirror_ring_x(ring, axis_x) for ring in rings]
+
+
+def mirror_segments_x(segments: list[list[list[float]]], axis_x: float) -> list[list[list[float]]]:
+    """Mirror a list of ``[[x1, y1], [x2, y2]]`` line segments' X coordinates
+    across ``axis_x`` (used for hatch-line output, which is a flat segment
+    list rather than closed rings)."""
+    return [[[2.0 * axis_x - p[0], p[1]] for p in seg] for seg in segments]
+
+
 def loop_to_segments(loop: list[tuple[float, float]]) -> list[list[list[float]]]:
     """Convert a single closed ring into a list of [p1, p2] line segments."""
     segments: list[list[list[float]]] = []

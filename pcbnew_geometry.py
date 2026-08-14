@@ -25,6 +25,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+try:
+    from contour_offsets import is_back_layer, mirror_rings_x  # noqa: F401
+except ImportError:
+    from kicad_plugin.contour_offsets import is_back_layer, mirror_rings_x  # noqa: F401
+
 Ring = list[tuple[float, float]]
 
 
@@ -110,8 +115,20 @@ def build_net_polygons_for_layer(board, layer_id: int, clearance_iu: int = 0):
 
 
 def _contour_to_ring(pcbnew, contour) -> Ring:
+    """Convert a pcbnew contour to a plain-tuple ring in mm, negating Y.
+
+    pcbnew's internal coordinate system has Y increasing *downward* (screen-
+    like), while KiCad's own DXF plotter (used by kicad-cli, the default
+    geometry source elsewhere in this app) negates Y on the way out so the
+    exported DXF looks identical -- not vertically flipped -- to the PCB
+    editor view when opened in any standard (Y-up) DXF viewer. Negating Y
+    here makes this pcbnew-native geometry source produce the exact same
+    coordinate convention, so it can be mixed with the DXF-based source (or
+    with drill-hole geometry, see ``get_drill_holes_from_board``) without a
+    vertical mismatch between them.
+    """
     return [
-        (pcbnew.ToMM(contour.CPoint(i).x), pcbnew.ToMM(contour.CPoint(i).y))
+        (pcbnew.ToMM(contour.CPoint(i).x), -pcbnew.ToMM(contour.CPoint(i).y))
         for i in range(contour.PointCount())
     ]
 
@@ -186,6 +203,14 @@ def get_drill_holes_from_board(board) -> list[tuple[float, float, float]]:
     drilled round holes at their center position), matching how they are
     physically drilled on the board.
 
+    Y is negated for the same reason as ``_contour_to_ring``: to match
+    KiCad's own DXF-export coordinate convention (and the PCB editor's visual
+    orientation) instead of pcbnew's raw Y-down internal frame, so drill
+    holes line up with F.Cu/B.Cu isolation routing exported anywhere else in
+    this app. Drilling itself is done in the same (front, unflipped)
+    orientation shown in the PCB editor, so no X-mirroring is applied here
+    (unlike back-side copper/mask layers, see ``get_board_mirror_axis_mm``).
+
     Returns a de-duplicated list of ``(x_mm, y_mm, diameter_mm)`` tuples.
     """
     pcbnew = _pcbnew()
@@ -198,7 +223,7 @@ def get_drill_holes_from_board(board) -> list[tuple[float, float, float]]:
         if diameter <= 0:
             continue
         pos = pad.GetPosition()
-        holes.append((pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y), diameter))
+        holes.append((pcbnew.ToMM(pos.x), -pcbnew.ToMM(pos.y), diameter))
 
     for track in board.GetTracks():
         if track.Type() != pcbnew.PCB_VIA_T:
@@ -207,7 +232,7 @@ def get_drill_holes_from_board(board) -> list[tuple[float, float, float]]:
         if diameter <= 0:
             continue
         pos = track.GetPosition()
-        holes.append((pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y), diameter))
+        holes.append((pcbnew.ToMM(pos.x), -pcbnew.ToMM(pos.y), diameter))
 
     unique: dict[tuple[float, float, float], tuple[float, float, float]] = {}
     for x, y, d in holes:
@@ -221,14 +246,34 @@ def get_board_x_span_mm(board) -> tuple[float, float] | None:
     """Return the (left, right) X extent of the board's own Edge.Cuts outline
     in mm, or None if the board has no edge-cuts geometry.
 
-    Used to mirror drill hole positions left/right across the board's own
-    footprint, so drilling can be done on the same physical side/orientation
-    as F.Cu isolation routing without re-flipping the board in between."""
+    X is unaffected by the Y-negation applied elsewhere in this module (it's
+    a plain coordinate flip, not a unit conversion), so this is the same X
+    frame used by drill holes, pcbnew-native contours, and kicad-cli's DXF
+    export alike. Used by ``get_board_mirror_axis_mm`` to mirror back-layer
+    geometry left/right across the board's own footprint.
+    """
     pcbnew = _pcbnew()
     bbox = board.GetBoardEdgesBoundingBox()
     if bbox.GetWidth() <= 0:
         return None
     return (pcbnew.ToMM(bbox.GetLeft()), pcbnew.ToMM(bbox.GetRight()))
+
+
+def get_board_mirror_axis_mm(board) -> float | None:
+    """Return the X (mm) of the board's own Edge.Cuts bounding-box center, or
+    None if the board has no edge-cuts geometry.
+
+    Back-side layers (``B.Cu``, ``B.Mask``, etc. -- see
+    ``contour_offsets.is_back_layer``) are mirrored across this axis so that
+    physically flipping the board left/right in place (staying within the
+    same footprint) lines the exported geometry up with the actual copper.
+    Neither kicad-cli's DXF export nor this module's own polygon extraction
+    mirror back layers on their own, so callers must apply this explicitly.
+    """
+    span = get_board_x_span_mm(board)
+    if span is None:
+        return None
+    return (span[0] + span[1]) / 2.0
 
 
 def generate_contour_offsets_from_board(
@@ -239,6 +284,7 @@ def generate_contour_offsets_from_board(
     repetitions: int,
     invert_direction: bool = False,
     auto_alternate_direction: bool = True,
+    mirror_axis_mm: float | None = None,
 ) -> list[Ring]:
     """Generate isolation-routing contour offset loops for one copper layer
     directly from a loaded pcbnew ``BOARD``, using KiCad's own Clipper-backed
@@ -251,6 +297,11 @@ def generate_contour_offsets_from_board(
     rings (each a list of ``(x, y)`` mm point tuples), one per generated loop,
     growth for a given net stopping as soon as it would collide with another
     net's grown region at the same step (overcut prevention).
+
+    ``mirror_axis_mm``, when given (e.g. from ``get_board_mirror_axis_mm``),
+    mirrors every resulting loop's X coordinate across that axis -- pass this
+    for back-side layers (see ``contour_offsets.is_back_layer``) so the
+    output lines up with the board once physically flipped over.
     """
     layer_id = resolve_layer_id(board, layer_name)
     net_polys = build_net_polygons_for_layer(board, layer_id)
@@ -261,6 +312,7 @@ def generate_contour_offsets_from_board(
         repetitions,
         invert_direction=invert_direction,
         auto_alternate_direction=auto_alternate_direction,
+        mirror_axis_mm=mirror_axis_mm,
     )
 
 
@@ -271,12 +323,16 @@ def generate_contour_offsets_from_net_polys(
     repetitions: int,
     invert_direction: bool = False,
     auto_alternate_direction: bool = True,
+    mirror_axis_mm: float | None = None,
 ) -> list[Ring]:
     """Same offsetting/overcut-prevention logic as
     ``generate_contour_offsets_from_board``, but operating on an
     already-built ``dict[net_code, SHAPE_POLY_SET]`` (e.g. reused across
     repeated preview/export calls instead of re-extracting it from the board
     every time, or a subset restricted to only the currently-selected nets).
+
+    ``mirror_axis_mm``, when given, mirrors every resulting loop's X
+    coordinate across that axis (see ``generate_contour_offsets_from_board``).
     """
     if not net_polys:
         return []
@@ -321,5 +377,8 @@ def generate_contour_offsets_from_net_polys(
                 break
 
             all_loops.extend(polyset_to_rings(grown))
+
+    if mirror_axis_mm is not None:
+        all_loops = mirror_rings_x(all_loops, mirror_axis_mm)
 
     return all_loops
