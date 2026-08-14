@@ -281,6 +281,31 @@ def get_board_mirror_axis_mm(board) -> float | None:
     return (span[0] + span[1]) / 2.0
 
 
+def get_board_edge_cuts_bbox_mm(board) -> tuple[float, float, float, float] | None:
+    """Return the board's own Edge.Cuts bounding box in mm as
+    ``(minx, miny, maxx, maxy)``, or None if the board has no edge-cuts
+    geometry.
+
+    Same X/Y frame as ``get_board_x_span_mm``/drill holes/pcbnew-native
+    contours/kicad-cli's DXF export (Y negated relative to pcbnew's own
+    internal coordinates, which increase downward). Used to derive tiny
+    corner alignment marks (see ``contour_offsets.corner_alignment_mark_segments``)
+    that get added to every exported DXF file so they all share an
+    identical bounding box regardless of which layer's geometry each file
+    actually contains -- working around fiber-laser controllers that
+    compute their own bounding box per loaded file and center/align on it.
+    """
+    pcbnew = _pcbnew()
+    bbox = board.GetBoardEdgesBoundingBox()
+    if bbox.GetWidth() <= 0 or bbox.GetHeight() <= 0:
+        return None
+    minx = pcbnew.ToMM(bbox.GetLeft())
+    maxx = pcbnew.ToMM(bbox.GetRight())
+    miny = -pcbnew.ToMM(bbox.GetBottom())
+    maxy = -pcbnew.ToMM(bbox.GetTop())
+    return (minx, miny, maxx, maxy)
+
+
 def generate_contour_offsets_from_board(
     board,
     layer_name: str,

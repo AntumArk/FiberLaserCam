@@ -230,6 +230,60 @@ def mirror_segments_x(segments: list[list[list[float]]], axis_x: float) -> list[
     return [[[2.0 * axis_x - p[0], p[1]] for p in seg] for seg in segments]
 
 
+DEFAULT_ALIGNMENT_MARGIN_MM = 1.0
+DEFAULT_ALIGNMENT_MARK_LENGTH_MM = 1.0
+
+
+def corner_alignment_mark_segments(
+    bbox: tuple[float, float, float, float],
+    margin_mm: float = DEFAULT_ALIGNMENT_MARGIN_MM,
+    mark_length_mm: float = DEFAULT_ALIGNMENT_MARK_LENGTH_MM,
+) -> list[list[list[float]]]:
+    """Return tiny "L"-shaped corner tick-mark line segments for the 4
+    corners of ``bbox`` (``(minx, miny, maxx, maxy)``, mm) expanded outward
+    by ``margin_mm`` on every side.
+
+    Some fiber-laser controllers compute their own bounding box from
+    whatever geometry is present in a loaded file and center/align the job
+    on that box, rather than trusting the file's own origin/coordinates.
+    Because each exported layer (F.Cu, B.Mask, drill holes, Edge.Cuts, ...)
+    can contain different geometry -- and therefore a different bounding
+    box -- the machine can end up centering each layer's file slightly
+    differently, throwing an otherwise-aligned multi-layer job out of
+    registration.
+
+    Adding these tiny corner marks to every exported file -- always
+    positioned at the same margin beyond the same Edge.Cuts bounding box,
+    regardless of which layer's geometry the rest of that file holds --
+    forces every exported file to share an identical overall bounding box,
+    so the machine's own auto bounding-box/centering behavior lines every
+    layer up consistently.
+
+    Each corner gets two short segments meeting exactly at the expanded
+    bbox corner and pointing inward along the X and Y axes, forming an "L"
+    bracket; the extreme points of the 8 returned segments are exactly the
+    4 corners of the margin-expanded bbox.
+    """
+    minx, miny, maxx, maxy = bbox
+    minx -= margin_mm
+    miny -= margin_mm
+    maxx += margin_mm
+    maxy += margin_mm
+
+    segments: list[list[list[float]]] = []
+    # (corner_x, corner_y, inward X sign, inward Y sign) for each of the 4 corners.
+    for corner_x, corner_y, dx, dy in (
+        (minx, miny, 1.0, 1.0),
+        (maxx, miny, -1.0, 1.0),
+        (maxx, maxy, -1.0, -1.0),
+        (minx, maxy, 1.0, -1.0),
+    ):
+        segments.append([[corner_x, corner_y], [corner_x + dx * mark_length_mm, corner_y]])
+        segments.append([[corner_x, corner_y], [corner_x, corner_y + dy * mark_length_mm]])
+
+    return segments
+
+
 def loop_to_segments(
     loop: list[tuple[float, float]], closed: bool = True
 ) -> list[list[list[float]]]:

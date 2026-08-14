@@ -26,7 +26,13 @@ from app_geometry import (
     sanitize_segments,
 )
 from app_sessions import UploadSession
-from contour_offsets import is_back_layer, loop_to_segments, mirror_ring_x, mirror_segments_x
+from contour_offsets import (
+    corner_alignment_mark_segments,
+    is_back_layer,
+    loop_to_segments,
+    mirror_ring_x,
+    mirror_segments_x,
+)
 
 
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -624,6 +630,30 @@ def _mirror_axis_for_layer(kicad_layer_name: str | None) -> float | None:
     return pcbnew_geometry.get_board_mirror_axis_mm(pcbnew.GetBoard())
 
 
+def _edge_cuts_bbox_mm() -> tuple[float, float, float, float] | None:
+    """Return the live board's own Edge.Cuts bounding box (mm), or None if
+    the board has no edge-cuts geometry.
+
+    Used to derive tiny corner alignment marks (see
+    ``contour_offsets.corner_alignment_mark_segments``) added to every
+    exported DXF file so they all share an identical bounding box
+    regardless of which layer's geometry each file actually contains --
+    working around fiber-laser controllers that compute their own bounding
+    box per loaded file and center/align on it, which would otherwise throw
+    a multi-layer job out of registration.
+    """
+    return pcbnew_geometry.get_board_edge_cuts_bbox_mm(pcbnew.GetBoard())
+
+
+def _add_corner_alignment_marks(modelspace, layer_name: str) -> None:
+    edge_cuts_bbox_mm = _edge_cuts_bbox_mm()
+    if edge_cuts_bbox_mm is None:
+        return
+    for seg in corner_alignment_mark_segments(edge_cuts_bbox_mm):
+        p1, p2 = seg
+        modelspace.add_line((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0), dxfattribs={"layer": layer_name})
+
+
 def _generate_preview_segments(
     session: UploadSession,
     payload: dict[str, object],
@@ -777,6 +807,8 @@ def _generate_export_dxf_bytes(
             p1, p2 = seg
             modelspace.add_line((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0), dxfattribs={"layer": layer_name})
 
+        _add_corner_alignment_marks(modelspace, layer_name)
+
         stream = io.StringIO()
         doc.write(stream)
         return stream.getvalue().encode("utf-8")
@@ -852,6 +884,8 @@ def _generate_export_dxf_bytes(
         for seg in segments:
             p1, p2 = seg
             modelspace.add_line((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0), dxfattribs={"layer": layer_name})
+
+    _add_corner_alignment_marks(modelspace, layer_name)
 
     stream = io.StringIO()
     doc.write(stream)

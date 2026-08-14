@@ -21,6 +21,7 @@ from app_sessions import UploadSession
 
 try:
     from contour_offsets import (
+        corner_alignment_mark_segments,
         generate_contour_offset_loops_multi,
         is_back_layer,
         loop_to_segments,
@@ -29,6 +30,7 @@ try:
     )
 except ImportError:
     from kicad_plugin.contour_offsets import (
+        corner_alignment_mark_segments,
         generate_contour_offset_loops_multi,
         is_back_layer,
         loop_to_segments,
@@ -431,6 +433,8 @@ def generate_kicad_drill_dxf(
         p1, p2 = seg
         msp.add_line((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0), dxfattribs={"layer": layer_name})
 
+    _add_corner_alignment_marks(msp, layer_name, resolve_edge_cuts_bbox_mm(source_path))
+
     output_dxf_path.parent.mkdir(parents=True, exist_ok=True)
     doc.saveas(str(output_dxf_path))
     return len(circles), len(segments)
@@ -530,6 +534,54 @@ def resolve_mirror_axis_mm(source_path: Path, layer_name: str) -> float | None:
     return _resolve_board_mirror_axis_mm(source_path)
 
 
+def _board_edge_cuts_bbox_from_text(board_path: Path) -> tuple[float, float, float, float] | None:
+    """Regex-based fallback for ``pcbnew_geometry.get_board_edge_cuts_bbox_mm``,
+    used when ``pcbnew`` isn't importable: parse every graphic item on the
+    ``Edge.Cuts`` layer directly out of the raw ``.kicad_pcb`` text and
+    return their combined bounding box as ``(minx, miny, maxx, maxy)``.
+
+    Y is negated (X unchanged) to match the same DXF-export coordinate
+    convention used everywhere else in this module (see
+    ``_collect_kicad_drill_holes``).
+    """
+    text = board_path.read_text(encoding="utf-8", errors="replace")
+    xs: list[float] = []
+    ys: list[float] = []
+    for keyword in _EDGE_CUTS_GRAPHIC_KEYWORDS:
+        for block in _extract_balanced_blocks(text, keyword):
+            if "Edge.Cuts" not in block:
+                continue
+            for m in _COORD_PAIR_RE.finditer(block):
+                xs.append(float(m.group(1)))
+                ys.append(float(m.group(2)))
+    if not xs:
+        return None
+    return (min(xs), -max(ys), max(xs), -min(ys))
+
+
+def resolve_edge_cuts_bbox_mm(source_path: Path) -> tuple[float, float, float, float] | None:
+    """Resolve the board's own Edge.Cuts bounding box (mm) from a KiCad
+    board/project source, read via ``pcbnew`` when importable, else parsed
+    out of the raw ``.kicad_pcb`` text. Returns None when the source isn't
+    (or doesn't reference) a KiCad board -- e.g. a bare DXF input with no
+    board reference -- or the board has no Edge.Cuts geometry.
+
+    Used to derive tiny corner alignment marks (see
+    ``contour_offsets.corner_alignment_mark_segments``) added to every
+    exported DXF file so they all share an identical bounding box
+    regardless of which layer's geometry each file actually contains.
+    """
+    try:
+        board_path = _resolve_board_path(source_path)
+    except RuntimeError:
+        return None
+
+    if pcbnew_geometry.is_pcbnew_available():
+        board = pcbnew_geometry.load_board(board_path)
+        return pcbnew_geometry.get_board_edge_cuts_bbox_mm(board)
+    return _board_edge_cuts_bbox_from_text(board_path)
+
+
 def _detect_input_kind(source_path: Path, input_format: str) -> str:
     if input_format in ("dxf", "kicad"):
         return input_format
@@ -567,6 +619,7 @@ def generate_contour_offset_dxf(
     invert_direction: bool = False,
     auto_alternate_direction: bool = True,
     mirror_axis_mm: float | None = None,
+    edge_cuts_bbox_mm: tuple[float, float, float, float] | None = None,
 ) -> tuple[int, int]:
     source_doc = ezdxf.readfile(str(source_dxf_path))
     polys = _collect_polygons_from_dxf(source_doc)
@@ -595,7 +648,7 @@ def generate_contour_offset_dxf(
         loops = [(mirror_ring_x(points, mirror_axis_mm), closed) for points, closed in loops]
 
     insunits = source_doc.header.get("$INSUNITS") if "$INSUNITS" in source_doc.header else None
-    _write_loops_dxf(loops, output_dxf_path, layer_name, insunits=insunits)
+    _write_loops_dxf(loops, output_dxf_path, layer_name, insunits=insunits, edge_cuts_bbox_mm=edge_cuts_bbox_mm)
     return len(polys), len(loops)
 
 
@@ -604,6 +657,7 @@ def _write_loops_dxf(
     output_dxf_path: Path,
     layer_name: str,
     insunits: int | None = None,
+    edge_cuts_bbox_mm: tuple[float, float, float, float] | None = None,
 ) -> None:
     out_doc = ezdxf.new("R2000")
     if insunits is not None:
@@ -627,8 +681,24 @@ def _write_loops_dxf(
         except Exception:
             continue
 
+    _add_corner_alignment_marks(msp, layer_name, edge_cuts_bbox_mm)
+
     output_dxf_path.parent.mkdir(parents=True, exist_ok=True)
     out_doc.saveas(str(output_dxf_path))
+
+
+def _add_corner_alignment_marks(
+    msp, layer_name: str, edge_cuts_bbox_mm: tuple[float, float, float, float] | None
+) -> None:
+    """Draw tiny corner alignment-mark line segments (see
+    ``contour_offsets.corner_alignment_mark_segments``) into ``msp`` on
+    ``layer_name`` when ``edge_cuts_bbox_mm`` is available. No-op when it's
+    None (e.g. bare DXF input with no board reference)."""
+    if edge_cuts_bbox_mm is None:
+        return
+    for seg in corner_alignment_mark_segments(edge_cuts_bbox_mm):
+        p1, p2 = seg
+        msp.add_line((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0), dxfattribs={"layer": layer_name})
 
 
 def generate_contour_offset_dxf_from_board(
@@ -671,6 +741,7 @@ def generate_contour_offset_dxf_from_board(
     mirror_axis_mm = (
         pcbnew_geometry.get_board_mirror_axis_mm(board) if is_back_layer(layer_name) else None
     )
+    edge_cuts_bbox_mm = pcbnew_geometry.get_board_edge_cuts_bbox_mm(board)
 
     loops = pcbnew_geometry.generate_contour_offsets_from_board(
         board,
@@ -689,7 +760,7 @@ def generate_contour_offset_dxf_from_board(
             "Check selected layer and contour parameters."
         )
 
-    _write_loops_dxf(loops, output_dxf_path, layer_name)
+    _write_loops_dxf(loops, output_dxf_path, layer_name, edge_cuts_bbox_mm=edge_cuts_bbox_mm)
     return net_count, len(loops)
 
 
@@ -727,6 +798,7 @@ def generate_hatch_dxf(
     invert_alternate_nesting: bool = False,
     multi_angle_hatch: bool = False,
     mirror_axis_mm: float | None = None,
+    edge_cuts_bbox_mm: tuple[float, float, float, float] | None = None,
 ) -> tuple[int, int]:
     zones, zone_map = build_zone_payload_from_dxf_path(str(source_dxf_path))
     session = UploadSession(
@@ -776,6 +848,8 @@ def generate_hatch_dxf(
     for seg in segments:
         p1, p2 = seg
         msp.add_line((p1[0], p1[1], 0.0), (p2[0], p2[1], 0.0), dxfattribs={"layer": layer_name})
+
+    _add_corner_alignment_marks(msp, layer_name, edge_cuts_bbox_mm)
 
     output_dxf_path.parent.mkdir(parents=True, exist_ok=True)
     out_doc.saveas(str(output_dxf_path))
@@ -926,6 +1000,11 @@ def run_export_all(source: Path, config_path: Path, output_dir: Path) -> list[st
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
 
+    # Resolved once per board (not per layer) so every file in this export-all
+    # run shares the exact same corner alignment marks -- see
+    # `_add_corner_alignment_marks`/`contour_offsets.corner_alignment_mark_segments`.
+    edge_cuts_bbox_mm = resolve_edge_cuts_bbox_mm(source)
+
     for entry in entries:
         kind = str(entry.get("kind", "layer"))
         output_name = entry.get("output")
@@ -987,6 +1066,7 @@ def run_export_all(source: Path, config_path: Path, output_dir: Path) -> list[st
                     alternate_nesting_hatch=bool(entry.get("alternate_nesting", False)),
                     invert_alternate_nesting=bool(entry.get("invert_alternate_nesting", False)),
                     multi_angle_hatch=bool(entry.get("multi_angle", False)),
+                    edge_cuts_bbox_mm=edge_cuts_bbox_mm,
                     mirror_axis_mm=mirror_axis_mm,
                 )
             else:
@@ -1000,6 +1080,7 @@ def run_export_all(source: Path, config_path: Path, output_dir: Path) -> list[st
                     invert_direction=bool(entry.get("invert", False)),
                     auto_alternate_direction=bool(entry.get("auto_alternate", True)),
                     mirror_axis_mm=mirror_axis_mm,
+                    edge_cuts_bbox_mm=edge_cuts_bbox_mm,
                 )
         written.append(str(output_path))
 
@@ -1058,11 +1139,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         with _prepared_input_dxf(args.source, args.input_format, args.kicad_layers) as source_dxf_path:
-            mirror_axis_mm = (
-                resolve_mirror_axis_mm(args.source, args.layer_name)
-                if _detect_input_kind(args.source, args.input_format) == "kicad"
-                else None
-            )
+            is_kicad_source = _detect_input_kind(args.source, args.input_format) == "kicad"
+            mirror_axis_mm = resolve_mirror_axis_mm(args.source, args.layer_name) if is_kicad_source else None
+            edge_cuts_bbox_mm = resolve_edge_cuts_bbox_mm(args.source) if is_kicad_source else None
             if args.mode == "hatch":
                 polys, count = generate_hatch_dxf(
                     source_dxf_path,
@@ -1074,6 +1153,7 @@ def main(argv: list[str] | None = None) -> int:
                     invert_alternate_nesting=args.invert_alternate_nesting,
                     multi_angle_hatch=args.multi_angle,
                     mirror_axis_mm=mirror_axis_mm,
+                    edge_cuts_bbox_mm=edge_cuts_bbox_mm,
                 )
                 print(f"source polygons: {polys}, generated hatch segments: {count} -> {args.output_dxf}")
             else:
@@ -1087,6 +1167,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.invert,
                     auto_alternate_direction=not args.no_auto_alternate,
                     mirror_axis_mm=mirror_axis_mm,
+                    edge_cuts_bbox_mm=edge_cuts_bbox_mm,
                 )
                 print(f"source polygons: {polys}, generated loops: {count} -> {args.output_dxf}")
     except Exception as exc:
