@@ -129,6 +129,11 @@ chmod +x FiberLaserCam-*.AppImage
 # Export every standard layer (F.Cu, B.Cu, Edge.Cuts, F.Mask, B.Mask, drill) to
 # separate DXF files in one go, driven by a JSON config (see below)
 ./FiberLaserCam-*.AppImage board.kicad_pcb ./export_out --export-all export_all_config.json
+
+# Ready-to-run examples:
+#   examples/export_all_layers.sh
+#   examples/export_all_config.default.json
+#   examples/export_all_config.pcbnew_geometry.json
 ```
 
 Short options: `-s` start offset, `-i` spacing (both in microns), `-n` repetitions. Add `--invert` to offset outward instead of inward. Input selection defaults to `--input-format auto` and can be forced with `--input-format dxf|kicad`. Use `--kicad-layers` to pass an explicit layer list for KiCad source exports. Run with `--help` for the full option list. This tool wraps `offline_export.generate_contour_offset_dxf()` / `generate_hatch_dxf()`, the same functions used internally by the KiCad plugin.
