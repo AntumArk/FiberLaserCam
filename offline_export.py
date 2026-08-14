@@ -181,11 +181,40 @@ def _collect_kicad_drill_holes(board_path: Path) -> list[tuple[float, float, flo
     Falls back to a plain-text regex parse of the ``.kicad_pcb`` file (see
     ``_collect_kicad_drill_holes_from_text``) when ``pcbnew`` isn't
     importable, e.g. a bare host Python without a KiCad install.
+
+    Hole X positions are mirrored left/right across the board's own
+    footprint (see ``_mirror_holes_x``) so drilling happens in the same
+    physical board orientation as F.Cu isolation routing, without having to
+    flip the board over between the two passes.
     """
     if pcbnew_geometry.is_pcbnew_available():
         board = pcbnew_geometry.load_board(board_path)
-        return pcbnew_geometry.get_drill_holes_from_board(board)
-    return _collect_kicad_drill_holes_from_text(board_path)
+        holes = pcbnew_geometry.get_drill_holes_from_board(board)
+        return _mirror_holes_x(holes, board)
+    return _mirror_holes_x(_collect_kicad_drill_holes_from_text(board_path))
+
+
+def _mirror_holes_x(
+    holes: list[tuple[float, float, float]], board=None
+) -> list[tuple[float, float, float]]:
+    """Mirror each hole's X position across the board's own Edge.Cuts extent
+    (or, lacking a board, across the hole set's own bounding box), so the
+    drilled pattern lands correctly when drilling on the same physical side/
+    orientation used for F.Cu isolation routing instead of the flipped
+    orientation the raw board coordinates assume."""
+    if not holes:
+        return holes
+
+    axis = None
+    if board is not None:
+        span = pcbnew_geometry.get_board_x_span_mm(board)
+        if span is not None:
+            axis = (span[0] + span[1]) / 2.0
+    if axis is None:
+        xs = [x for x, _y, _d in holes]
+        axis = (min(xs) + max(xs)) / 2.0
+
+    return [(2.0 * axis - x, y, d) for x, y, d in holes]
 
 
 def _collect_kicad_drill_holes_from_text(board_path: Path) -> list[tuple[float, float, float]]:

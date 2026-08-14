@@ -143,6 +143,30 @@ class PcbnewGeometryTests(unittest.TestCase):
         holes = pg.get_drill_holes_from_board(board)
         self.assertEqual(holes, [])
 
+    def test_get_board_x_span_mm_returns_edge_cuts_extent(self):
+        import pcbnew
+
+        board = pcbnew.BOARD()
+        shape = pcbnew.PCB_SHAPE(board)
+        shape.SetShape(pcbnew.SHAPE_T_RECT)
+        shape.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(0), pcbnew.FromMM(0)))
+        shape.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(20), pcbnew.FromMM(10)))
+        shape.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(shape)
+
+        span = pg.get_board_x_span_mm(board)
+        self.assertIsNotNone(span)
+        left, right = span
+        self.assertAlmostEqual(left, 0.0, delta=0.2)
+        self.assertAlmostEqual(right, 20.0, delta=0.2)
+
+    def test_get_board_x_span_mm_returns_none_without_edge_cuts(self):
+        import pcbnew
+
+        board = pcbnew.BOARD()
+        span = pg.get_board_x_span_mm(board)
+        self.assertIsNone(span)
+
 
 if __name__ == "__main__":
     unittest.main()

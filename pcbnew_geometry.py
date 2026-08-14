@@ -217,6 +217,20 @@ def get_drill_holes_from_board(board) -> list[tuple[float, float, float]]:
     return list(unique.values())
 
 
+def get_board_x_span_mm(board) -> tuple[float, float] | None:
+    """Return the (left, right) X extent of the board's own Edge.Cuts outline
+    in mm, or None if the board has no edge-cuts geometry.
+
+    Used to mirror drill hole positions left/right across the board's own
+    footprint, so drilling can be done on the same physical side/orientation
+    as F.Cu isolation routing without re-flipping the board in between."""
+    pcbnew = _pcbnew()
+    bbox = board.GetBoardEdgesBoundingBox()
+    if bbox.GetWidth() <= 0:
+        return None
+    return (pcbnew.ToMM(bbox.GetLeft()), pcbnew.ToMM(bbox.GetRight()))
+
+
 def generate_contour_offsets_from_board(
     board,
     layer_name: str,
