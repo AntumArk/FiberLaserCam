@@ -292,6 +292,18 @@ def _is_point_in_ring(point: Point, ring: Ring) -> bool:
 def _ring_contains_ring(outer: Ring, inner: Ring) -> bool:
     if polygon_area(inner) >= polygon_area(outer):
         return False
+
+    # Bounding-box fast reject: `inner`'s bbox must fit inside `outer`'s bbox
+    # before it's even worth doing the expensive per-point containment test
+    # below. This is what keeps nesting-depth detection usable on boards with
+    # thousands of pads/tracks, where the vast majority of ring pairs are
+    # spatially unrelated and would otherwise still pay for a full point-in-
+    # polygon scan just to be rejected.
+    ominx, ominy, omaxx, omaxy = polygon_bounds(outer)
+    iminx, iminy, imaxx, imaxy = polygon_bounds(inner)
+    if iminx < ominx or iminy < ominy or imaxx > omaxx or imaxy > omaxy:
+        return False
+
     return all(_is_point_in_ring(p, outer) for p in inner)
 
 
@@ -521,6 +533,39 @@ def _selected_zone_ids(zone_polys: dict[str, Ring], selected_ids: list) -> list[
     return selected
 
 
+def _bbox_overlap_pairs(
+    bboxes: list[tuple[float, float, float, float]],
+) -> list[tuple[int, int]]:
+    """Interval-sweep broad phase: return index pairs whose bounding boxes
+    overlap, without the O(n^2) cost of comparing every pair directly. Used to
+    cut down the candidate pairs checked by the (much more expensive)
+    full polygon containment test.
+    """
+    n = len(bboxes)
+    if n < 2:
+        return []
+
+    events: list[tuple[float, int, int]] = []
+    for i, (minx, _miny, maxx, _maxy) in enumerate(bboxes):
+        events.append((minx, 0, i))
+        events.append((maxx, 1, i))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    active: dict[int, tuple[float, float, float, float]] = {}
+    pairs: list[tuple[int, int]] = []
+    for _, kind, i in events:
+        if kind == 0:
+            bi = bboxes[i]
+            for j, bj in active.items():
+                if bi[3] < bj[1] or bj[3] < bi[1]:
+                    continue
+                pairs.append((i, j) if i < j else (j, i))
+            active[i] = bi
+        else:
+            active.pop(i, None)
+    return pairs
+
+
 def compute_ring_nesting_depths(polys: list[Ring]) -> list[int]:
     """Compute containment nesting depth (0 = outermost) for a flat list of rings.
 
@@ -528,15 +573,39 @@ def compute_ring_nesting_depths(polys: list[Ring]) -> list[int]:
     This is used to auto-detect "holes" (odd depth) versus "solid" outlines (even
     depth) so isolation-routing contours can alternate offset direction without
     requiring the user to manually flip each nested contour.
+
+    Containment implies the rings' bounding boxes overlap, so a bbox broad
+    phase is used to skip the (much more expensive) full point-in-polygon
+    containment test for ring pairs that plainly can't nest -- this keeps the
+    function usable on boards with thousands of pads/tracks/vias, where a
+    naive full O(n^2) scan (recomputing each ring's area on every comparison)
+    can take many seconds on its own.
     """
     n = len(polys)
     depths = [0] * n
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
-            if _ring_contains_ring(polys[j], polys[i]):
-                depths[i] += 1
+    if n < 2:
+        return depths
+
+    areas = [polygon_area(p) for p in polys]
+    bboxes = [polygon_bounds(p) for p in polys]
+
+    for i, j in _bbox_overlap_pairs(bboxes):
+        # Containment can only go from the larger-area ring to the smaller one.
+        if areas[i] < areas[j]:
+            smaller, larger = i, j
+        elif areas[j] < areas[i]:
+            smaller, larger = j, i
+        else:
+            continue
+
+        ominx, ominy, omaxx, omaxy = bboxes[larger]
+        iminx, iminy, imaxx, imaxy = bboxes[smaller]
+        if iminx < ominx or iminy < ominy or imaxx > omaxx or imaxy > omaxy:
+            continue
+
+        if all(_is_point_in_ring(p, polys[larger]) for p in polys[smaller]):
+            depths[smaller] += 1
+
     return depths
 
 
