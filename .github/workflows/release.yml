@@ -112,6 +112,7 @@ jobs:
                   current["install_size"] = install_size
                   continue
 
+              release_zip_path.unlink(missing_ok=True)
               subprocess.run(
                   ["zip", "-r", str(zip_output_path), "."],
                   cwd=package_dir,
