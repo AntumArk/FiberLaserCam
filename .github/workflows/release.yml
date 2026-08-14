@@ -83,7 +83,7 @@ jobs:
           package_dir = Path("package")
           release_dir = Path("release")
           metadata_path = package_dir / "metadata.json"
-          zip_output_path = Path("..") / release_dir / zip_name
+          zip_output_path = release_dir / zip_name
           release_zip_path = release_dir / zip_name
 
           with open("packaging/metadata.template.json", "r", encoding="utf-8") as f:
