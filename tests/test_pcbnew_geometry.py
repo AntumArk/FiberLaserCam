@@ -190,6 +190,66 @@ class PcbnewGeometryTests(unittest.TestCase):
         board = pcbnew.BOARD()
         self.assertIsNone(pg.get_board_mirror_axis_mm(board))
 
+    def test_build_net_polygons_for_layer_edge_cuts_returns_outer_only(self):
+        """Edge.Cuts has no pads/tracks/zones, so it must be resolved through
+        the board's own outline geometry -- and any interior holes/cutouts
+        drawn on Edge.Cuts (e.g. mounting-hole circles) must be dropped so a
+        cutting pass only ever cuts the outer board profile."""
+        import pcbnew
+
+        board = pcbnew.BOARD()
+
+        outer = pcbnew.PCB_SHAPE(board)
+        outer.SetShape(pcbnew.SHAPE_T_RECT)
+        outer.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(0), pcbnew.FromMM(0)))
+        outer.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(20), pcbnew.FromMM(10)))
+        outer.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(outer)
+
+        hole = pcbnew.PCB_SHAPE(board)
+        hole.SetShape(pcbnew.SHAPE_T_CIRCLE)
+        hole.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(10), pcbnew.FromMM(5)))
+        hole.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(12), pcbnew.FromMM(5)))
+        hole.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(hole)
+
+        layer_id = pg.resolve_layer_id(board, "Edge.Cuts")
+        net_polys = pg.build_net_polygons_for_layer(board, layer_id)
+
+        self.assertEqual(len(net_polys), 1)
+        poly = next(iter(net_polys.values()))
+        self.assertGreater(poly.OutlineCount(), 0, "Edge.Cuts must yield the outer board contour")
+        total_holes = sum(poly.HoleCount(i) for i in range(poly.OutlineCount()))
+        self.assertEqual(total_holes, 0, "Edge.Cuts polygons must exclude interior holes/cutouts")
+
+    def test_generate_contour_offsets_from_board_edge_cuts_returns_outer_loop(self):
+        board = self._make_edge_cuts_board_with_hole()
+        loops = pg.generate_contour_offsets_from_board(
+            board, "Edge.Cuts", start_offset=0.1, spacing=0.1, repetitions=1
+        )
+        self.assertEqual(len(loops), 1, "only the outer board profile should be cut, not the interior hole")
+
+    def _make_edge_cuts_board_with_hole(self):
+        import pcbnew
+
+        board = pcbnew.BOARD()
+
+        outer = pcbnew.PCB_SHAPE(board)
+        outer.SetShape(pcbnew.SHAPE_T_RECT)
+        outer.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(0), pcbnew.FromMM(0)))
+        outer.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(20), pcbnew.FromMM(10)))
+        outer.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(outer)
+
+        hole = pcbnew.PCB_SHAPE(board)
+        hole.SetShape(pcbnew.SHAPE_T_CIRCLE)
+        hole.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(10), pcbnew.FromMM(5)))
+        hole.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(12), pcbnew.FromMM(5)))
+        hole.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(hole)
+
+        return board
+
     def test_generate_contour_offsets_from_board_mirrors_back_layer(self):
         """Passing mirror_axis_mm should mirror every generated loop's X
         coordinate across that axis (Y unchanged) -- used for B.Cu/B.Mask so
