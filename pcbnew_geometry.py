@@ -37,6 +37,16 @@ except ImportError:
 
 Ring = list[tuple[float, float]]
 
+# KiCad's own high-precision arc-approximation tolerance (``ARC_HIGH_DEF_MM``
+# in KiCad's C++ ``include/base_units.h``), used as the max error when KiCad
+# itself flattens arcs/circles into polygon segments (e.g. in
+# ``TransformShapeToPolygon()``/``Inflate()`` below). This constant is not
+# exposed on the ``pcbnew`` Python module (it is a plain ``constexpr``, not a
+# class member or scripting API), so it is duplicated here rather than
+# referenced via ``pcbnew.ARC_HIGH_DEF_MM`` (which does not exist and raises
+# ``AttributeError``).
+_ARC_HIGH_DEF_MM = 0.005
+
 
 def is_pcbnew_available() -> bool:
     """Return True if the ``pcbnew`` module can be imported in this process.
@@ -103,16 +113,24 @@ def _edge_cuts_outer_polygon(pcbnew, board):
     Uses KiCad's own ``BOARD.GetBoardPolygonOutlines()`` -- the same outline
     resolution used internally for 3D rendering and Gerber/STEP export -- so
     arcs/circles on Edge.Cuts are captured accurately instead of being
-    re-approximated by hand. Only the outer contour(s) should ever be
-    laser-cut for a board-profile cutting pass; interior holes are not real
-    copper/nesting features the way isolation-routing nets are, so they are
-    stripped here rather than exposed as offsettable holes.
+    re-approximated by hand. Only the single largest-area outline is kept;
+    any other outline reported by ``GetBoardPolygonOutlines()`` (e.g.
+    mounting-hole circles/rectangles drawn directly on Edge.Cuts, which are
+    resolved as their own top-level outlines rather than as holes of the
+    board outline) is discarded rather than exposed as an offsettable
+    boundary, since only the board's own profile should ever be laser-cut
+    for a board-profile cutting pass.
     """
     raw = pcbnew.SHAPE_POLY_SET()
     board.GetBoardPolygonOutlines(raw)
     outer = pcbnew.SHAPE_POLY_SET()
-    for outline_idx in range(raw.OutlineCount()):
-        outer.AddOutline(raw.Outline(outline_idx))
+    if raw.OutlineCount() == 0:
+        return outer
+    largest_idx = max(
+        range(raw.OutlineCount()),
+        key=lambda idx: abs(raw.Outline(idx).Area()),
+    )
+    outer.AddOutline(raw.Outline(largest_idx))
     return outer
 
 
@@ -136,7 +154,7 @@ def build_net_polygons_for_layer(board, layer_id: int, clearance_iu: int = 0):
             return {}
         return {0: outer}
 
-    error_iu = pcbnew.FromMM(pcbnew.ARC_HIGH_DEF_MM)
+    error_iu = pcbnew.FromMM(_ARC_HIGH_DEF_MM)
 
     by_net: dict[int, list] = {}
     for item in _copper_items_for_layer(board, layer_id):
@@ -412,7 +430,7 @@ def generate_contour_offsets_from_net_polys(
         return []
 
     pcbnew = _pcbnew()
-    error_iu = pcbnew.FromMM(pcbnew.ARC_HIGH_DEF_MM)
+    error_iu = pcbnew.FromMM(_ARC_HIGH_DEF_MM)
 
     net_codes = list(net_polys.keys())
 
