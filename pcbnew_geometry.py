@@ -95,47 +95,13 @@ def _copper_items_for_layer(board, layer_id: int):
     return items
 
 
-def _edge_cuts_outer_polygon(pcbnew, board):
-    """Build a ``SHAPE_POLY_SET`` containing only the outer boundary/boundaries
-    of the board's own Edge.Cuts outline, discarding any enclosed
-    holes/cutouts (e.g. mounting-hole circles drawn directly on Edge.Cuts).
-
-    Uses KiCad's own ``BOARD.GetBoardPolygonOutlines()`` -- the same outline
-    resolution used internally for 3D rendering and Gerber/STEP export -- so
-    arcs/circles on Edge.Cuts are captured accurately instead of being
-    re-approximated by hand. Only the outer contour(s) should ever be
-    laser-cut for a board-profile cutting pass; interior holes are not real
-    copper/nesting features the way isolation-routing nets are, so they are
-    stripped here rather than exposed as offsettable holes.
-    """
-    raw = pcbnew.SHAPE_POLY_SET()
-    board.GetBoardPolygonOutlines(raw)
-    outer = pcbnew.SHAPE_POLY_SET()
-    for outline_idx in range(raw.OutlineCount()):
-        outer.AddOutline(raw.Outline(outline_idx))
-    return outer
-
-
 def build_net_polygons_for_layer(board, layer_id: int, clearance_iu: int = 0):
     """Group copper features on a layer by net code, merging touching
     same-net shapes into single polygons via ``Simplify()``.
 
-    Edge.Cuts is special-cased: it has no pads/tracks/zones (those are
-    copper-layer concepts), so it is resolved through the board's own
-    outline geometry instead, keyed under a single synthetic net code
-    (``0``) and containing only the outer boundary/boundaries (see
-    ``_edge_cuts_outer_polygon``).
-
     Returns ``dict[net_code, SHAPE_POLY_SET]``.
     """
     pcbnew = _pcbnew()
-
-    if layer_id == pcbnew.Edge_Cuts:
-        outer = _edge_cuts_outer_polygon(pcbnew, board)
-        if outer.OutlineCount() == 0:
-            return {}
-        return {0: outer}
-
     error_iu = pcbnew.FromMM(pcbnew.ARC_HIGH_DEF_MM)
 
     by_net: dict[int, list] = {}
