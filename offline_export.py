@@ -53,7 +53,10 @@ def _find_kicad_cli() -> str | None:
         resolved = shutil.which(candidate)
         if resolved:
             return resolved
-    return None
+    # Not on PATH (common on Windows, where KiCad's installer doesn't add its
+    # bin/ directory to PATH) -- fall back to locating it next to pcbnew's
+    # own install directory, when pcbnew is importable in this process.
+    return pcbnew_geometry.find_kicad_cli_near_pcbnew()
 
 
 def _extract_board_layer_names(board_path: Path) -> list[str]:

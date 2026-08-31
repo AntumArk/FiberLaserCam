@@ -491,8 +491,75 @@ def _candidate_overlap_pairs(
     return sorted(pairs)
 
 
+def _segment_bbox(
+    p1: tuple[float, float], p2: tuple[float, float]
+) -> tuple[float, float, float, float]:
+    return (min(p1[0], p2[0]), min(p1[1], p2[1]), max(p1[0], p2[0]), max(p1[1], p2[1]))
+
+
+def _bipartite_candidate_pairs(
+    bboxes_a: list[tuple[float, float, float, float]],
+    bboxes_b: list[tuple[float, float, float, float]],
+) -> list[tuple[int, int]]:
+    events: list[tuple[float, int, int, int]] = []
+    for i, (minx, _miny, maxx, _maxy) in enumerate(bboxes_a):
+        events.append((minx, 0, 0, i))
+        events.append((maxx, 1, 0, i))
+    for j, (minx, _miny, maxx, _maxy) in enumerate(bboxes_b):
+        events.append((minx, 0, 1, j))
+        events.append((maxx, 1, 1, j))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    active_a: dict[int, tuple[float, float, float, float]] = {}
+    active_b: dict[int, tuple[float, float, float, float]] = {}
+    pairs: list[tuple[int, int]] = []
+    for _, kind, list_id, idx in events:
+        this_active, other_active = (active_a, active_b) if list_id == 0 else (active_b, active_a)
+        if kind == 0:
+            bbox = (bboxes_a if list_id == 0 else bboxes_b)[idx]
+            for other_idx, other_bbox in other_active.items():
+                if bbox[3] < other_bbox[1] or other_bbox[3] < bbox[1]:
+                    continue
+                pairs.append((idx, other_idx) if list_id == 0 else (other_idx, idx))
+            this_active[idx] = bbox
+        else:
+            this_active.pop(idx, None)
+
+    return pairs
+
+
 def _rings_overlap(ring_a: list[tuple[float, float]], ring_b: list[tuple[float, float]]) -> bool:
     """Return True if two closed rings cross each other or one contains the other."""
+    if not ring_a or not ring_b:
+        return False
+
+    bbox_a = _ring_bbox(ring_a)
+    bbox_b = _ring_bbox(ring_b)
+    if not _bboxes_overlap(bbox_a, bbox_b):
+        return False
+
+    n, m = len(ring_a), len(ring_b)
+    seg_bboxes_a = [_segment_bbox(ring_a[i], ring_a[(i + 1) % n]) for i in range(n)]
+    seg_bboxes_b = [_segment_bbox(ring_b[j], ring_b[(j + 1) % m]) for j in range(m)]
+    for i, j in _bipartite_candidate_pairs(seg_bboxes_a, seg_bboxes_b):
+        a1, a2 = ring_a[i], ring_a[(i + 1) % n]
+        b1, b2 = ring_b[j], ring_b[(j + 1) % m]
+        if _segments_intersect(a1, a2, b1, b2):
+            return True
+
+    return _point_in_ring(ring_a[0], ring_b) or _point_in_ring(ring_b[0], ring_a)
+
+
+def _rings_cross_or_share_edge(
+    ring_a: list[tuple[float, float]], ring_b: list[tuple[float, float]]
+) -> bool:
+    """Return True if two closed rings' boundaries actually cross or coincide.
+
+    Unlike `_rings_overlap`, this deliberately does *not* treat pure
+    containment (one ring wholly nested inside the other, boundaries never
+    touching) as a match -- see `_rings_touch_or_overlap` for why that
+    distinction matters.
+    """
     if not ring_a or not ring_b:
         return False
 
@@ -508,27 +575,34 @@ def _rings_overlap(ring_a: list[tuple[float, float]], ring_b: list[tuple[float, 
             b1, b2 = ring_b[j], ring_b[(j + 1) % m]
             if _segments_intersect(a1, a2, b1, b2):
                 return True
-
-    return _point_in_ring(ring_a[0], ring_b) or _point_in_ring(ring_b[0], ring_a)
+    return False
 
 
 def _rings_touch_or_overlap(
     ring_a: list[tuple[float, float]], ring_b: list[tuple[float, float]], tol: float = 1e-4
 ) -> bool:
-    """Return True if two closed rings touch (share an edge/vertex) or overlap.
+    """Return True if two closed rings touch (share an edge/vertex) or cross.
 
-    `_rings_overlap` treats a perfectly touching boundary (shared edge, no
-    crossing) as *not* overlapping. Copper features belonging to the same net
-    (e.g. a pad and the track soldered to it) are exported as separate closed
-    rings even though they are physically one contiguous blob of copper, so
-    they typically touch exactly rather than cross. Nudging one ring outward
-    by a tiny tolerance first turns that touching contact into a detectable
-    overlap.
+    Copper features belonging to the same net (e.g. a pad and the track
+    soldered to it) are exported as separate closed rings even though they
+    are physically one contiguous blob of copper, so they typically touch
+    exactly (shared seam) rather than cross. Nudging one ring outward by a
+    tiny tolerance first turns that touching contact into a detectable
+    crossing.
+
+    Deliberately does *not* treat pure containment (one ring entirely inside
+    the other, with a real gap and no shared boundary) as touching: e.g. a
+    filled zone's clearance hole around a different net's pad fully contains
+    that pad's own copper ring, but they are not the same physical copper --
+    exempting them from overcut-prevention trimming (as `_rings_overlap`'s
+    containment case would do here) let the pad's isolation offset keep
+    growing straight past the clearance gap into the zone's solid copper
+    instead of stopping at it.
     """
-    if _rings_overlap(ring_a, ring_b):
+    if _rings_cross_or_share_edge(ring_a, ring_b):
         return True
     nudged = _offset_ring(ring_a, tol) or ring_a
-    return _rings_overlap(nudged, ring_b)
+    return _rings_cross_or_share_edge(nudged, ring_b)
 
 
 def _touching_groups(

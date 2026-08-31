@@ -20,6 +20,9 @@ dist/
 temp_dxf/
 *.log
 
+# Local KiCad install copy, generated during build -- source lives at repo root.
+/plugins/
+
 .DS_Store
 Thumbs.db
 .vscode/

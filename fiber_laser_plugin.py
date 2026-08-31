@@ -72,9 +72,9 @@ def _default_layer_settings_for(layer_name: str) -> dict[str, object]:
     base = dict(DEFAULT_LAYER_SETTINGS)
     normalized = layer_name.strip().lower()
     if normalized == "edge.cuts":
-        base["mode"] = "hatch"
-        base["hatchAll"] = True
-        base["outerZoneOnly"] = True
+        base["mode"] = "contour_offsets"
+        base["offsetStart"] = 0.0
+        base["offsetCount"] = 1
     elif normalized in {"f.mask", "b.mask"}:
         # Solder mask layers are exported as hatch fill (not isolation contours)
         # so the laser clears the paint/mask coating inside the openings.
@@ -224,7 +224,8 @@ def _find_kicad_cli() -> str | None:
         resolved = shutil.which(candidate)
         if resolved:
             return resolved
-    return None
+
+    return pcbnew_geometry.find_kicad_cli_near_pcbnew()
 
 
 def _extract_board_layer_names(board_path: Path) -> list[str]:
@@ -271,7 +272,13 @@ def _run_kicad_dxf_export(kicad_cli: str, board_path: Path, output_path: Path, l
         "mm",
         "--use-contours",
     ]
-    completed = subprocess.run(command, capture_output=True, text=True)
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=45)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            "kicad-cli did not respond within 45s (it may be stuck waiting on the board file -- "
+            "try saving the board first, or closing and reopening this plugin)."
+        )
     if completed.returncode != 0:
         details = completed.stderr.strip() or completed.stdout.strip() or "Unknown export failure."
         raise RuntimeError(details)
@@ -911,6 +918,7 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         self._pcbnew_ctx: dict[str, object] | None = None
         self._all_layer_settings = _load_all_layer_settings()
         self._suspend_events = False
+        self._loaded_layer: str | None = None
 
         outer_panel = wx.Panel(self)
         root = wx.BoxSizer(wx.HORIZONTAL)
@@ -1018,6 +1026,8 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         outer.Add(self.CreateSeparatedButtonSizer(wx.CLOSE), 0, wx.ALL | wx.EXPAND, 8)
         self.SetSizerAndFit(outer)
         self.SetMinSize((1080, 680))
+        self.SetSize((1080, 680))
+        self.Centre()
 
         self.layer_choice.Bind(wx.EVT_CHOICE, self._on_layer_changed)
         self.mode_choice.Bind(wx.EVT_CHOICE, self._on_settings_changed)
@@ -1207,13 +1217,14 @@ class FiberLaserWorkspaceDialog(wx.Dialog):
         settings, err = self._read_controls_to_settings()
         if err or settings is None:
             return
-        layer = self._current_layer()
+        layer = self._loaded_layer or self._current_layer()
         self._all_layer_settings[layer] = settings
         _save_all_layer_settings(self._all_layer_settings)
         _save_last_layer(layer)
 
     def _load_layer(self, layer: str) -> None:
         settings = self._all_layer_settings.get(layer, _default_layer_settings_for(layer))
+        self._loaded_layer = layer
         self._apply_settings_to_controls(settings)
         self._refresh_mode_control_states()
 

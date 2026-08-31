@@ -59,6 +59,30 @@ def _pcbnew():
     return pcbnew
 
 
+def find_kicad_cli_near_pcbnew() -> str | None:
+    if not is_pcbnew_available():
+        return None
+
+    pcbnew = _pcbnew()
+    module_file = getattr(pcbnew, "__file__", None)
+    if not module_file:
+        return None
+
+    names = ("kicad-cli.exe", "kicad-cli")
+    directory = Path(module_file).resolve().parent
+    for _ in range(6):
+        for candidate_dir in (directory, directory / "bin"):
+            for name in names:
+                candidate = candidate_dir / name
+                if candidate.is_file():
+                    return str(candidate)
+        if directory.parent == directory:
+            break
+        directory = directory.parent
+
+    return None
+
+
 def load_board(source):
     """Load a board from a path, or pass through an already-loaded BOARD.
 
